@@ -11,7 +11,7 @@
  * e limpar todos os caches (útil se algo travar).
  */
 
-const VERSAO = "idealis-v18";
+const VERSAO = "idealis-v22";
 const CACHE_APP = VERSAO + "-app";
 const CACHE_CDN = VERSAO + "-cdn";
 
@@ -68,6 +68,15 @@ self.addEventListener("fetch", (e) => {
     req.mode === "navigate" ||
     (req.headers.get("accept") || "").includes("text/html");
 
+  // 0) API (Apps Script) -> SEMPRE pela rede, nunca cacheia.
+  //    Sem isso, o GET dos exercícios ficava preso no cache e a lista
+  //    aparecia desatualizada até dar Ctrl+Shift+R.
+  const ehAPI =
+    url.hostname.endsWith("script.google.com") ||
+    url.hostname.endsWith("script.googleusercontent.com") ||
+    url.hostname.endsWith("googleusercontent.com");
+  if (ehAPI) return; // deixa passar direto pro navegador, sem interceptar
+
   // 1) HTML -> rede primeiro (deploy novo sempre vence), cache como fallback offline
   if (ehHTML) {
     e.respondWith(
@@ -86,7 +95,11 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // 2) CDN (React, Babel, fontes) -> cache primeiro, busca na rede se não tiver
+  // 2) CDN conhecido (React, Babel, fontes) -> cache primeiro.
+  //    Allowlist explícita: qualquer outro domínio passa direto pela rede.
+  const CDNS = ["unpkg.com", "fonts.googleapis.com", "fonts.gstatic.com", "cdnjs.cloudflare.com"];
+  const ehCDN = CDNS.some((d) => url.hostname === d || url.hostname.endsWith("." + d));
+  if (!mesmaOrigem && !ehCDN) return; // terceiro desconhecido: não intercepta
   if (!mesmaOrigem) {
     e.respondWith(
       (async () => {
