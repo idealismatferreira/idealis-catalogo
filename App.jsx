@@ -45,10 +45,12 @@ async function apiCall(payload, { tentativas = 3, metodo = "POST" } = {}) {
   let ultimoErro;
   for (let i = 0; i < tentativas; i++) {
     try {
-      const opts = metodo === "GET" ? {} : {
+      // cache:"no-store" garante dados frescos mesmo se o navegador tentar cachear
+      const opts = metodo === "GET" ? { cache: "no-store" } : {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify(payload),
+        cache: "no-store",
       };
       const r = await fetch(API_URL, opts);
       const txt = await r.text();
@@ -298,6 +300,7 @@ function CardapioTab() {
         contexto: x.contexto || "",
         bi_set: x.bi_set || "",
         observacao: x.observacao || "",
+        video_url: x.video_url || "",
       };
       FLAG_FIELDS.forEach((f) => (dados[f.k] = strip(x[f.k]) === "x" ? "X" : ""));
       try {
@@ -334,6 +337,7 @@ function CardapioTab() {
         contexto: x.contexto || "",
         bi_set: x.bi_set || "",
         observacao: x.observacao || "",
+        video_url: x.video_url || "",
       };
       FLAG_FIELDS.forEach((f) => (dados[f.k] = strip(x[f.k]) === "x" ? "X" : ""));
       try {
@@ -618,6 +622,15 @@ function CardapioTab() {
                 {splitVals(x.musculo_alvo).length > 0 && <div><span style={{ color: C.cyan }}>Alvo terapêutico</span> · {splitVals(x.musculo_alvo).join(" | ")}</div>}
                 {x.bi_set && <div><span style={{ color: C.cyan }}>Bi-set</span> · {x.bi_set}</div>}
                 {x.observacao && <div><span style={{ color: C.cyan }}>Obs</span> · {x.observacao}</div>}
+                {x.video_url && (
+                  <div style={{ marginTop: 6 }}>
+                    <a href={x.video_url} target="_blank" rel="noopener noreferrer"
+                      onClick={(ev) => ev.stopPropagation()}
+                      style={{ color: C.bright, textDecoration: "none", fontWeight: 700 }}>
+                      ▶ Assistir vídeo
+                    </a>
+                  </div>
+                )}
                 <div style={{ marginTop: 4 }}>
                   {strip(x.isometrico) === "x" ? "Isométrico · " : ""}
                   {strip(x.unilateral) === "x" ? "Unilateral · " : ""}
@@ -938,6 +951,7 @@ function GerirSubgrupos({ grupos, subCurados, onClose, onChanged }) {
 function EditorModal({ registro, vocab, subsPorGrupoCurado = {}, erroSub = "", onClose, onSaved }) {
   const isEdit = !!registro.id;
   const [nome, setNome] = useState(registro.exercicio || "");
+  const [videoUrl, setVideoUrl] = useState(registro.video_url || "");
   const [sel, setSel] = useState({
     grupo: splitVals(registro.grupo),
     subgrupo: splitVals(registro.subgrupo),
@@ -976,6 +990,7 @@ function EditorModal({ registro, vocab, subsPorGrupoCurado = {}, erroSub = "", o
       contexto: registro.contexto || "",
       bi_set: registro.bi_set || "",
       observacao: registro.observacao || "",
+      video_url: videoUrl.trim(),
     };
     FLAG_FIELDS.forEach((f) => (dados[f.k] = flags[f.k] ? "X" : ""));
     if (isEdit) dados.id = registro.id;
@@ -1095,6 +1110,17 @@ function EditorModal({ registro, vocab, subsPorGrupoCurado = {}, erroSub = "", o
             color: C.text, padding: "12px 13px", fontSize: 16, fontFamily: "inherit", outline: "none", marginBottom: 18 }}
           onFocus={(e) => (e.target.style.borderColor = C.cyan)}
           onBlur={(e) => (e.target.style.borderColor = C.line)} />
+
+        <div style={{ marginBottom: 18 }}>
+          <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700,
+            textTransform: "uppercase", marginBottom: 7, display: "block" }}>🎬 Vídeo</span>
+          <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)}
+            placeholder="Cole o link do YouTube (não listado)"
+            style={{ width: "100%", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+              color: C.text, padding: "11px 13px", fontSize: 14, fontFamily: "inherit", outline: "none" }}
+            onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+            onBlur={(e) => (e.target.style.borderColor = C.line)} />
+        </div>
 
         {secao("grupo")}
         {secaoSubgrupo()}
