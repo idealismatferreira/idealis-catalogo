@@ -582,6 +582,12 @@ function CardapioTab() {
                   {strip(x.em_casa) === "x" ? "  ·  🏠" : ""}
                 </div>
               </div>
+              {x.video_url && (
+                <a href={x.video_url} target="_blank" rel="noopener noreferrer"
+                  onClick={(ev) => ev.stopPropagation()} title="Assistir vídeo"
+                  style={{ flex: "0 0 auto", color: C.bright, fontSize: 16, padding: 4,
+                    textDecoration: "none", lineHeight: 1 }}>▶</a>
+              )}
               <button onClick={() => setEditing(x)} title="Editar"
                 style={{ flex: "0 0 auto", background: "none", border: "none", color: C.muted,
                   fontSize: 15, cursor: "pointer", padding: 4 }}>✎</button>
@@ -1114,12 +1120,20 @@ function EditorModal({ registro, vocab, subsPorGrupoCurado = {}, erroSub = "", o
         <div style={{ marginBottom: 18 }}>
           <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700,
             textTransform: "uppercase", marginBottom: 7, display: "block" }}>🎬 Vídeo</span>
-          <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)}
-            placeholder="Cole o link do YouTube (não listado)"
-            style={{ width: "100%", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
-              color: C.text, padding: "11px 13px", fontSize: 14, fontFamily: "inherit", outline: "none" }}
-            onFocus={(e) => (e.target.style.borderColor = C.cyan)}
-            onBlur={(e) => (e.target.style.borderColor = C.line)} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)}
+              placeholder="Cole o link do YouTube (não listado)"
+              style={{ flex: 1, minWidth: 0, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+                color: C.text, padding: "11px 13px", fontSize: 14, fontFamily: "inherit", outline: "none" }}
+              onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+              onBlur={(e) => (e.target.style.borderColor = C.line)} />
+            {videoUrl.trim() && (
+              <a href={videoUrl.trim()} target="_blank" rel="noopener noreferrer" title="Abrir vídeo"
+                style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center",
+                  background: C.cyan, color: C.bg, borderRadius: 10, padding: "0 16px",
+                  fontSize: 16, fontWeight: 700, textDecoration: "none" }}>▶</a>
+            )}
+          </div>
         </div>
 
         {secao("grupo")}
