@@ -1,0 +1,2222 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Idealis — Cardápio &amp; Protocolos</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0b0f10">
+  <meta name="description" content="Catálogo de exercícios e protocolos clínicos — Ferreira Trainer">
+  <link rel="icon" href="favicon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Idealis">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+  <!-- versões FIXAS: react 18 em build de produção, babel travado no 7 (babel 8 quebra UMD) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+  <!-- mesma versão usada pela Dashboard -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4"></script>
+
+  <style>
+    html,body{margin:0;padding:0;background:#0b0f10;color:#e6e6e6;font-family:system-ui,sans-serif}
+    body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+    #erro{display:none;position:fixed;inset:0;z-index:99999;background:#0b0f10;color:#ff6b6b;
+      padding:20px;font-family:monospace;font-size:13px;white-space:pre-wrap;overflow:auto}
+    #versao{position:fixed;bottom:4px;right:6px;z-index:99998;font:10px monospace;color:#333}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <pre id="erro"></pre>
+  <div id="versao">BUILD-v26-supabase-grupos</div>
+
+  <script>
+    function _mostraErro(msg){
+      var e=document.getElementById("erro");
+      e.style.display="block";
+      e.textContent="ERRO (manda esse print pro Claude):\n\n"+msg;
+    }
+    window.addEventListener("error",function(ev){
+      _mostraErro((ev.message||"erro")+"\n\n"+((ev.error&&ev.error.stack)||""));
+    });
+    window.addEventListener("unhandledrejection",function(ev){
+      _mostraErro("Promise rejeitada:\n"+((ev.reason&&(ev.reason.stack||ev.reason.message))||ev.reason));
+    });
+    // se o app não sinalizar que subiu em 6s, mostra aviso (erro de compilação do Babel)
+    setTimeout(function(){
+      if(!window.__APP_OK) _mostraErro("O app não iniciou em 6 segundos.\nProvável erro de compilação. Abra o console do navegador.");
+    },6000);
+
+    (function(){
+      if (!("serviceWorker" in navigator)) return;
+      if (location.search.indexOf("sw=off") !== -1) {
+        navigator.serviceWorker.getRegistrations().then(function(rs){ rs.forEach(function(r){ r.unregister(); }); });
+        if (window.caches) caches.keys().then(function(ks){ ks.forEach(function(k){ caches.delete(k); }); });
+        console.log("[PWA] service worker desligado e cache limpo");
+        return;
+      }
+      window.addEventListener("load", function(){
+        navigator.serviceWorker.register("sw.js").catch(function(e){ console.log("[PWA] SW:", e); });
+      });
+    })();
+  </script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useEffect, useCallback } = React;
+
+/* =========================================================================
+   CONFIG
+   ========================================================================= */
+const SUPABASE_URL      = "https://lbnemzhwibcarhkaifoy.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_AH0V90ZsYBYpm8M_H0zQPg_zg9po7uo";
+
+// storageKey próprio: o Catálogo e a Dashboard estão no mesmo domínio.
+// Sem isto, sair de um desloga o outro.
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { storageKey: "idealis-catalogo", persistSession: true, autoRefreshToken: true },
+});
+
+const C = {
+  bg: "#0b0f10", surface: "#111a1c", surface2: "#162225", line: "#1e2f33",
+  cyan: "#00c9cc", bright: "#71fcff", text: "#e8f2f3", muted: "#6f8488", danger: "#e0685f",
+  lime: "#dbff00",
+};
+
+// campos multi-valor. grupos é array de verdade no banco; os outros três são
+// text com " | " por dentro (foi assim que a Dashboard importou da planilha).
+const CAMPOS_ARRAY = ["grupos"];
+const CAMPOS_PIPE  = ["subgrupo", "equipamento", "musculo_alvo"];
+const MULTI = [...CAMPOS_ARRAY, ...CAMPOS_PIPE];
+
+const FLAG_FIELDS = [
+  { k: "video_proprio", label: "Vídeo próprio" },
+  { k: "em_casa",       label: "Em casa" },
+  { k: "isometrico",    label: "Isométrico" },
+  { k: "unilateral",    label: "Unilateral" },
+  { k: "a_filmar",      label: "A filmar" },
+];
+// bi_set NÃO entra: a coluna é de uso exclusivo da Dashboard/App Idealis.
+// bruto também não: é legado congelado da planilha.
+
+const LABELS = { grupos: "Grupo", subgrupo: "Categoria", equipamento: "Equipamento", musculo_alvo: "Alvo terapêutico" };
+
+/* =========================================================================
+   HELPERS
+   ========================================================================= */
+const strip = (s) =>
+  (s || "").toString().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+const splitVals = (s) =>
+  (s || "").toString().split("|").map((x) => x.trim()).filter(Boolean);
+
+// text com pipes: devolve null quando vazio (a Dashboard gravou null, não "")
+const joinVals = (arr) => {
+  const v = (arr || []).filter(Boolean).join(" | ");
+  return v || null;
+};
+
+const txtOuNull = (s) => { const v = (s || "").toString().trim(); return v || null; };
+const agora = () => new Date().toISOString();
+
+// lê qualquer campo multi como lista, não importa se é array ou text com pipe
+const vals = (x, campo) =>
+  CAMPOS_ARRAY.includes(campo) ? (x[campo] || []).filter(Boolean) : splitVals(x[campo]);
+
+const mesmo = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+/* Reproduz a regra de resolução de grupo da view vw_exercicios_resolvidos (Dashboard).
+   Resolve quando: 1 muscular; vários musculares com prioridades diferentes (menor vence);
+   ou 0 muscular e exatamente 1 complementar. Fora disso o exercício fica AMBÍGUO e
+   some do total do Volume. `info` = mapa grupo -> linha de grupos_exibicao. */
+function avaliarVolume(grupos, info) {
+  const conhecidos = [], fantasmas = [];
+  (grupos || []).forEach((g) => (info[g] ? conhecidos : fantasmas).push(g));
+  const musc = conhecidos.filter((g) => info[g].tipo === "muscular");
+  const comp = conhecidos.filter((g) => info[g].tipo === "complementar");
+
+  let estado = "ambiguo", vencedor = null, motivo = "";
+
+  if (musc.length === 1) { estado = "ok"; vencedor = musc[0]; }
+  else if (musc.length > 1) {
+    const min = Math.min(...musc.map((g) => info[g].prioridade));
+    const empatados = musc.filter((g) => info[g].prioridade === min);
+    if (empatados.length === 1) { estado = "ok"; vencedor = empatados[0]; }
+    else motivo = `${empatados.length} grupos musculares com a mesma prioridade (${min}): ${empatados.join(", ")}`;
+  }
+  else if (comp.length === 1) { estado = "ok"; vencedor = comp[0]; }
+  else if (comp.length > 1) motivo = `nenhum grupo muscular e ${comp.length} complementares: ${comp.join(", ")}`;
+  else if (conhecidos.length) motivo = "nenhum grupo muscular nem complementar";
+  else motivo = "nenhum grupo reconhecido pela tabela oficial";
+
+  const linha = vencedor ? (info[vencedor].linha || vencedor) : null;
+  const quebraSub = !!(vencedor && info[vencedor].quebra_subgrupo);
+  return { estado, vencedor, linha, quebraSub, motivo, fantasmas };
+}
+
+function baixarJSON(nomeArquivo, conteudo) {
+  const blob = new Blob([JSON.stringify(conteudo, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = nomeArquivo;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function msgErro(e, oque) {
+  const m = (e && e.message) || String(e);
+  if (/null value in column "id"/i.test(m) || /23502/.test(m))
+    return `${oque}: o banco ainda não gera o id sozinho. Falta rodar o DDL da migração (sequences).`;
+  if (/column .*arquivado_em/i.test(m))
+    return `${oque}: a coluna arquivado_em ainda não existe. Falta rodar o DDL da migração.`;
+  if (/JWT|jwt|401|403|expired/i.test(m))
+    return `${oque}: sessão expirada. Saia e entre de novo.`;
+  if (/Failed to fetch|NetworkError/i.test(m))
+    return `${oque}: sem conexão com o servidor. Tente de novo.`;
+  return `${oque}: ${m}`;
+}
+
+/* =========================================================================
+   CAMADA DB — todo acesso ao Supabase passa por aqui.
+   Quando o ecossistema virar multi-tenant, muda SÓ neste bloco.
+   ========================================================================= */
+const TENANT = {
+  filtro:  (q) => q,     // futuro: q.eq("tenant_id", tenantAtual)
+  carimbo: () => ({}),   // futuro: { tenant_id: tenantAtual }
+};
+
+const PAGINA = 1000; // a API corta em 1000 linhas sem dar erro
+
+async function lerPaginado(tabela, montar) {
+  let de = 0, out = [];
+  for (;;) {
+    let q = sb.from(tabela).select("*");
+    q = TENANT.filtro(q);
+    if (montar) q = montar(q);
+    const { data, error } = await q.range(de, de + PAGINA - 1);
+    if (error) throw new Error(msgErro(error, `ler ${tabela}`));
+    out = out.concat(data || []);
+    if (!data || data.length < PAGINA) break;
+    de += PAGINA;
+    if (de > 100000) break; // trava de segurança
+  }
+  return out;
+}
+
+// Toda escrita passa por aqui: confere error E confere linhas afetadas.
+// Zero linhas NUNCA é sucesso (é o sintoma clássico de RLS barrando em silêncio).
+async function escrever(oque, consulta) {
+  const { data, error } = await consulta;
+  if (error) throw new Error(msgErro(error, oque));
+  if (!data || data.length === 0)
+    throw new Error(`${oque}: nenhuma linha foi alterada. Sua sessão provavelmente não é de treinador.`);
+  return data;
+}
+
+// variante para operações em que zero linhas é resultado legítimo
+// (ex.: renomear um subgrupo que não está na lista curada)
+async function escreverPermiteZero(oque, consulta) {
+  const { data, error } = await consulta;
+  if (error) throw new Error(msgErro(error, oque));
+  return data || [];
+}
+
+async function contarUso(tabela, cardapioId) {
+  const { count, error } = await sb.from(tabela)
+    .select("*", { count: "exact", head: true })
+    .eq("cardapio_id", cardapioId);
+  if (error) return null; // null = não consegui saber (trata como "pode estar em uso")
+  return count || 0;
+}
+
+const db = {
+  /* ---- sessão ---- */
+  entrar: (email, senha) => sb.auth.signInWithPassword({ email, password: senha }),
+  sair:   () => sb.auth.signOut(),
+  async ehTreinador() {
+    const { data, error } = await sb.rpc("eh_treinador");
+    if (error) return false;
+    return data === true;
+  },
+
+  /* ---- cardápio ---- */
+  cardapioLer: () => lerPaginado("cardapio", (q) => q.order("id")),
+
+  cardapioCriar: (campos) =>
+    escrever("criar exercício",
+      sb.from("cardapio")
+        .insert({ ...campos, ...TENANT.carimbo(), contextos: campos.contextos || [], sincronizado_em: agora() })
+        .select("*")),
+
+  // só os campos alterados + a data (a Dashboard usa sincronizado_em para "última atualização")
+  cardapioAtualizar: (id, patch) =>
+    escrever("salvar exercício",
+      sb.from("cardapio").update({ ...patch, sincronizado_em: agora() }).eq("id", id).select("*")),
+
+  cardapioArquivar: (id) =>
+    escrever("arquivar exercício",
+      sb.from("cardapio").update({ arquivado_em: agora(), sincronizado_em: agora() }).eq("id", id).select("id")),
+
+  cardapioRestaurar: (id) =>
+    escrever("restaurar exercício",
+      sb.from("cardapio").update({ arquivado_em: null, sincronizado_em: agora() }).eq("id", id).select("id")),
+
+  async cardapioUsos(id) {
+    const [ex, ck, pr] = await Promise.all([
+      contarUso("exercicios", id),
+      contarUso("checkin_exercicios", id),
+      contarUso("protocolos", id),
+    ]);
+    const incerto = ex === null || ck === null || pr === null;
+    return { exercicios: ex, checkins: ck, protocolos: pr, incerto,
+             total: (ex || 0) + (ck || 0) + (pr || 0) };
+  },
+
+  cardapioExcluirDefinitivo: (id) =>
+    escrever("excluir exercício",
+      sb.from("cardapio").delete().eq("id", id).select("id")),
+
+  /* ---- subgrupos curados ---- */
+  subLer: () => lerPaginado("subgrupos", (q) => q.order("grupo").order("ordem").order("subgrupo")),
+  subCriar: (grupo, subgrupo) =>
+    escrever("criar subgrupo",
+      sb.from("subgrupos").insert({ grupo, subgrupo, ordem: 0, ...TENANT.carimbo() }).select("*")),
+  subExcluir: (id) =>
+    escrever("excluir subgrupo", sb.from("subgrupos").delete().eq("id", id).select("id")),
+  // renomear subgrupo na lista curada; zero linhas aqui é normal
+  subRenomear: (de, para) =>
+    escreverPermiteZero("renomear subgrupo curado",
+      sb.from("subgrupos").update({ subgrupo: para }).eq("subgrupo", de).select("id")),
+
+  /* ---- ordem oficial dos grupos (compartilhada com a Dashboard) ---- */
+  gruposExibicaoLer: () => lerPaginado("grupos_exibicao", (q) => q.order("ordem")),
+
+  /* ---- protocolos clínicos ---- */
+  protLer: () => lerPaginado("protocolos",
+    (q) => q.order("protocolo").order("categoria").order("ordem").order("id")),
+  protCriar: (dados) =>
+    escrever("criar bloco",
+      sb.from("protocolos").insert({ ...dados, ...TENANT.carimbo() }).select("*")),
+  protAtualizar: (id, dados) =>
+    escrever("salvar bloco",
+      sb.from("protocolos").update({ ...dados, atualizado_em: agora() }).eq("id", id).select("*")),
+  protExcluir: (id) =>
+    escrever("excluir bloco", sb.from("protocolos").delete().eq("id", id).select("id")),
+};
+
+/* =========================================================================
+   LOGO
+   ========================================================================= */
+const LOGO_D = "M897.5 1884.9C829.2 1881.6 751.2 1869.1 691.0 1851.9C627.4 1833.7 572.4 1812.3 517.5 1784.5C400.5 1725.2 298.9 1643.7 214.5 1541.5C136.6 1447.2 76.0 1334.2 40.5 1217.0C-16.4 1029.3 -13.0 824.3 49.9 639.8C107.0 472.5 209.1 325.6 346.7 212.6C478.5 104.5 642.5 32.6 809.5 9.6C922.4 -6.0 1025.2 -2.7 1137.0 20.1C1242.2 41.6 1352.2 86.1 1445.0 144.8C1531.7 199.6 1607.8 267.0 1673.6 347.0C1750.1 440.2 1810.5 553.2 1845.5 669.0C1901.2 853.2 1899.2 1052.4 1839.8 1235.0C1784.3 1405.6 1680.1 1557.6 1539.3 1673.4C1433.1 1760.6 1306.1 1824.3 1170.2 1858.4C1128.2 1869.0 1064.7 1879.3 1019.5 1882.9C982.5 1885.9 933.6 1886.7 897.5 1884.9ZM980.0 1785.5C1005.6 1784.4 1015.8 1783.6 1039.0 1780.9C1140.1 1768.9 1234.5 1740.7 1323.4 1695.7C1387.3 1663.4 1445.6 1623.8 1503.0 1573.6C1517.7 1560.8 1560.5 1518.0 1573.6 1503.0C1664.7 1399.0 1726.7 1282.3 1760.0 1152.5C1772.5 1103.8 1782.0 1044.1 1784.5 999.0C1784.9 992.7 1785.3 985.0 1785.6 982.0C1786.1 974.8 1786.1 911.2 1785.6 904.0C1785.3 901.0 1784.9 893.3 1784.5 887.0C1782.6 852.8 1775.9 805.0 1767.5 765.3C1728.3 581.4 1625.0 411.8 1479.4 292.4C1381.4 212.0 1273.0 157.0 1150.5 125.5C1104.4 113.6 1042.3 103.7 999.5 101.5C992.9 101.1 984.8 100.7 981.5 100.5C973.7 100.0 912.3 100.0 904.5 100.5C901.2 100.7 893.1 101.1 886.5 101.5C843.7 103.7 781.6 113.6 735.5 125.5C589.8 163.0 460.4 235.7 353.7 340.0C225.1 465.7 140.3 628.0 111.1 804.5C106.7 831.1 102.8 864.4 101.5 886.0C101.2 891.8 100.7 899.4 100.5 903.0C100.0 911.3 99.9 974.7 100.4 982.0C100.7 985.0 101.1 992.7 101.5 999.0C102.7 1021.0 106.5 1054.2 111.1 1081.5C135.3 1228.0 197.3 1364.0 292.6 1479.6C375.2 1579.8 482.9 1661.8 600.0 1713.5C680.0 1748.8 759.6 1770.6 847.0 1780.9C870.2 1783.6 880.0 1784.4 906.5 1785.6C914.8 1785.9 921.6 1786.3 921.7 1786.4C922.1 1786.7 966.9 1786.1 980.0 1785.5ZM568.8 1524.2C571.0 1521.6 647.9 1416.9 739.7 1291.5C831.5 1166.1 911.9 1056.3 918.3 1047.6C924.7 1038.8 929.7 1031.4 929.4 1031.1C929.1 1030.8 838.3 1030.3 727.6 1030.0L526.4 1029.5L648.5 862.8C715.7 771.1 770.9 695.8 771.2 695.5C772.0 694.6 1069.3 597.0 1069.7 597.4C1069.9 597.6 1019.0 666.8 956.6 751.1L843.1 904.5L1049.0 904.8C1162.3 904.9 1255.0 905.2 1255.0 905.5C1255.0 905.8 1237.3 928.6 1215.7 956.3C1166.2 1019.5 1178.9 1002.5 1018.8 1218.9L882.9 1402.5L1088.9 1402.8C1202.3 1402.9 1295.0 1403.4 1295.0 1403.8C1295.0 1404.3 1244.0 1432.7 1181.7 1466.8L1068.4 1529.0L816.6 1529.0L564.9 1529.0L568.8 1524.2ZM848.3 597.7C848.8 596.0 1122.4 225.2 1122.9 225.6C1123.6 226.2 1145.8 502.5 1145.2 503.1C1144.7 503.6 873.4 591.1 852.2 597.6C848.9 598.6 847.9 598.7 848.3 597.7Z";
+const LogoIdealis = ({ size = 30, color }) => (
+  <svg viewBox="0 0 1886 1886" width={size} height={size} aria-label="Idealis"
+    style={{ display: "block", color: color || C.lime }}>
+    <path fill="currentColor" fillRule="evenodd" d={LOGO_D} />
+  </svg>
+);
+
+/* =========================================================================
+   LOGIN
+   ========================================================================= */
+function Login() {
+  const [email, setEmail] = useState("");
+  const [senha, setSenha] = useState("");
+  const [erro, setErro] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const entrar = async () => {
+    if (!email || !senha) { setErro("Preencha e-mail e senha."); return; }
+    setBusy(true); setErro("");
+    const { error } = await db.entrar(email.trim(), senha);
+    setBusy(false);
+    if (error) setErro(error.message === "Invalid login credentials"
+      ? "E-mail ou senha incorretos." : error.message);
+  };
+
+  const input = {
+    width: "100%", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+    color: C.text, padding: "12px 13px", fontSize: 16, fontFamily: "inherit",
+    outline: "none", marginBottom: 10,
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ width: "100%", maxWidth: 360 }}>
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
+          <LogoIdealis size={56} />
+        </div>
+        <h1 style={{ fontSize: 18, fontWeight: 700, textAlign: "center", margin: "0 0 4px" }}>
+          Cardápio &amp; Protocolos
+        </h1>
+        <p style={{ fontSize: 13, color: C.muted, textAlign: "center", marginTop: 0, marginBottom: 22 }}>
+          Entre com a mesma conta da Dashboard.
+        </p>
+        {erro && (
+          <div style={{ background: `${C.danger}18`, border: `1px solid ${C.danger}55`, color: C.danger,
+            borderRadius: 9, padding: "9px 12px", fontSize: 13, marginBottom: 12 }}>{erro}</div>
+        )}
+        <input type="email" inputMode="email" autoComplete="username" placeholder="E-mail"
+          value={email} onChange={(e) => setEmail(e.target.value)} style={input}
+          onKeyDown={(e) => { if (e.key === "Enter") entrar(); }} />
+        <input type="password" autoComplete="current-password" placeholder="Senha"
+          value={senha} onChange={(e) => setSenha(e.target.value)} style={input}
+          onKeyDown={(e) => { if (e.key === "Enter") entrar(); }} />
+        <button onClick={entrar} disabled={busy}
+          style={{ width: "100%", background: busy ? C.line : C.cyan, border: "none", color: C.bg,
+            borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700,
+            cursor: busy ? "default" : "pointer", fontFamily: "inherit" }}>
+          {busy ? "Entrando…" : "Entrar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   AVISOS E BOTÕES COMUNS
+   ========================================================================= */
+function Aviso({ tipo = "erro", children, acao, acaoLabel }) {
+  const cor = tipo === "erro" ? C.danger : C.cyan;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, background: `${cor}12`,
+      border: `1px solid ${cor}44`, borderRadius: 10, padding: "9px 11px", marginTop: 8 }}>
+      <span style={{ flex: 1, fontSize: 11.5, color: C.text, lineHeight: 1.45 }}>{children}</span>
+      {acao && (
+        <button onClick={acao}
+          style={{ background: "none", border: `1px solid ${cor}66`, color: cor, borderRadius: 8,
+            padding: "5px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            whiteSpace: "nowrap" }}>
+          {acaoLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const chipBtn = (active, onClick, key, children, dim) => (
+  <button key={key} onClick={onClick}
+    style={{
+      background: active ? C.cyan : "transparent",
+      color: active ? C.bg : dim ? C.muted : C.text,
+      border: `1px solid ${active ? C.cyan : C.line}`,
+      borderRadius: 999, padding: "6px 12px", fontSize: 12.5,
+      fontWeight: active ? 700 : 500, whiteSpace: "nowrap", cursor: "pointer",
+      fontFamily: "inherit", transition: "all .12s ease",
+    }}>
+    {children}
+  </button>
+);
+
+/* =========================================================================
+   ABA CARDÁPIO
+   ========================================================================= */
+function CardapioTab({ podeEditar }) {
+  const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState("");
+  const [lista, setLista] = useState([]);          // ativos
+  const [arquivados, setArquivados] = useState([]);
+  const [subCurados, setSubCurados] = useState([]);
+  const [erroSub, setErroSub] = useState("");
+  const [ordemGrupos, setOrdemGrupos] = useState([]); // de grupos_exibicao
+
+  const [q, setQ] = useState("");
+  const [gruposF, setGruposF] = useState([]);
+  const [subgruposF, setSubgruposF] = useState([]);
+  const [equipF, setEquipF] = useState([]);
+  const [flagsF, setFlagsF] = useState([]);
+  const [open, setOpen] = useState(null);
+
+  const [prancheta, setPrancheta] = useState([]);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const [editing, setEditing] = useState(null);
+  const [gerindo, setGerindo] = useState(false);
+  const [gerindoSub, setGerindoSub] = useState(false);
+  const [verArquivados, setVerArquivados] = useState(false);
+
+  const [modoSub, setModoSub] = useState(false);
+  const [rascunho, setRascunho] = useState({});
+  const [salvandoLote, setSalvandoLote] = useState(null);
+  const [erroLote, setErroLote] = useState("");
+
+  /* ---- carregar ---- */
+  const carregar = useCallback(async () => {
+    setLoading(true); setErro("");
+    try {
+      const todos = await db.cardapioLer();
+      setLista(todos.filter((x) => !x.arquivado_em));
+      setArquivados(todos.filter((x) => x.arquivado_em));
+    } catch (e) {
+      setErro(String(e.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const carregarSub = useCallback(async () => {
+    setErroSub("");
+    try { setSubCurados(await db.subLer()); }
+    catch (e) { setErroSub(String(e.message || e)); }
+  }, []);
+
+  const carregarOrdem = useCallback(async () => {
+    try { setOrdemGrupos(await db.gruposExibicaoLer()); }
+    catch (e) { setOrdemGrupos([]); } // sem a tabela, cai no alfabético
+  }, []);
+
+  useEffect(() => { carregar(); carregarSub(); carregarOrdem(); },
+    [carregar, carregarSub, carregarOrdem]);
+
+  /* ---- ordenação de grupos vinda de grupos_exibicao ---- */
+  const posGrupo = useMemo(() => {
+    const m = {};
+    ordemGrupos.forEach((g) => { m[strip(g.grupo)] = g.ordem; });
+    return m;
+  }, [ordemGrupos]);
+
+  const ordenarGrupos = useCallback((arr) =>
+    [...arr].sort((a, b) => {
+      const ia = posGrupo[strip(a)], ib = posGrupo[strip(b)];
+      if (ia !== undefined && ib !== undefined) return ia - ib;
+      if (ia !== undefined) return -1;
+      if (ib !== undefined) return 1;
+      return a.localeCompare(b, "pt");
+    }), [posGrupo]);
+
+  // grupos oficiais (grupos_exibicao) — única fonte de grupo válido
+  const gruposOficiais = useMemo(
+    () => ordemGrupos.map((g) => g.grupo), [ordemGrupos]);
+
+  const infoGrupo = useMemo(() => {
+    const m = {};
+    ordemGrupos.forEach((g) => { m[g.grupo] = g; });
+    return m;
+  }, [ordemGrupos]);
+
+  /* ---- vocabulários ---- */
+  const vocab = useMemo(() => {
+    const v = { grupos: new Set(), subgrupo: new Set(), equipamento: new Set(), musculo_alvo: new Set() };
+    [...lista, ...arquivados].forEach((x) => MULTI.forEach((f) => vals(x, f).forEach((val) => v[f].add(val))));
+    const out = {};
+    Object.keys(v).forEach((k) => (out[k] = [...v[k]].sort((a, b) => a.localeCompare(b, "pt"))));
+    out.grupos = ordenarGrupos(out.grupos);
+    return out;
+  }, [lista, arquivados, ordenarGrupos]);
+
+  const subsPorGrupoCurado = useMemo(() => {
+    const m = {};
+    subCurados.forEach((o) => {
+      const g = String(o.grupo || "").trim(), s = String(o.subgrupo || "").trim();
+      if (!g || !s) return;
+      if (!m[g]) m[g] = [];
+      if (!m[g].includes(s)) m[g].push(s);
+    });
+    return m;
+  }, [subCurados]);
+
+  const subgruposDisponiveis = useMemo(() => {
+    if (!gruposF.length) return [];
+    const s = new Set();
+    gruposF.forEach((g) => (subsPorGrupoCurado[g] || []).forEach((sub) => s.add(sub)));
+    return [...s].sort((a, b) => a.localeCompare(b, "pt"));
+  }, [gruposF, subsPorGrupoCurado]);
+
+  /* ---- busca + filtros ---- */
+  const results = useMemo(() => {
+    const terms = strip(q.trim()).split(/\s+/).filter(Boolean);
+    return lista.filter((x) => {
+      const gs = vals(x, "grupos"), es = vals(x, "equipamento"), sgs = vals(x, "subgrupo");
+      if (gruposF.length && !gruposF.some((g) => gs.includes(g))) return false;
+      if (subgruposF.length && !subgruposF.some((s) => sgs.includes(s))) return false;
+      if (equipF.length && !equipF.some((e) => es.includes(e))) return false;
+      if (flagsF.some((f) => x[f] !== true)) return false;
+      if (terms.length) {
+        const hay = strip([x.exercicio, gs.join(" "), x.subgrupo, x.equipamento, x.musculo_alvo].join(" "));
+        if (!terms.every((t) => hay.includes(t))) return false;
+      }
+      return true;
+    });
+  }, [lista, q, gruposF, subgruposF, equipF, flagsF]);
+
+  const toggle = (arr, set, v) => set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
+  const clearAll = () => { setQ(""); setGruposF([]); setSubgruposF([]); setEquipF([]); setFlagsF([]); };
+
+  const toggleGrupo = (g) => {
+    const novos = gruposF.includes(g) ? gruposF.filter((x) => x !== g) : [...gruposF, g];
+    setGruposF(novos);
+    if (!novos.length) { setSubgruposF([]); return; }
+    const validos = new Set();
+    novos.forEach((gr) => (subsPorGrupoCurado[gr] || []).forEach((s) => validos.add(s)));
+    setSubgruposF((prev) => prev.filter((s) => validos.has(s)));
+  };
+
+  /* ---- prancheta ---- */
+  const inPrancheta = (id) => prancheta.some((p) => p.id === id);
+  const addPick = (x) =>
+    setPrancheta((p) => (inPrancheta(x.id) ? p.filter((y) => y.id !== x.id) : [...p, x]));
+  const copiar = () => {
+    const txt = prancheta.map((x) => x.exercicio).join("\n");
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(ta);
+    setCopied(true); setTimeout(() => setCopied(false), 1600);
+  };
+
+  const activeFilters = gruposF.length + subgruposF.length + equipF.length + flagsF.length;
+
+  const gruposSugeridos = useMemo(() => {
+    const nq = strip(q.trim());
+    if (!nq) return [];
+    return vocab.grupos.filter((g) => strip(g).includes(nq) && !gruposF.includes(g));
+  }, [q, vocab.grupos, gruposF]);
+
+  const aplicarTagGrupo = (g) => {
+    setGruposF((prev) => (prev.includes(g) ? prev : [...prev, g]));
+    setQ("");
+  };
+
+  // grupos que estão no cardápio mas não existem em grupos_exibicao:
+  // os exercícios que só têm esses grupos ficam fora do Volume
+  const gruposFantasma = useMemo(
+    () => (ordemGrupos.length ? vocab.grupos.filter((g) => !infoGrupo[g]) : []),
+    [vocab.grupos, infoGrupo, ordemGrupos]);
+
+  /* ---- modos em massa ---- */
+  const grupoUnico = gruposF.length === 1 ? gruposF[0] : null;
+  const subsDoGrupoUnico = grupoUnico ? (subsPorGrupoCurado[grupoUnico] || []) : [];
+
+  const ligarModo = (modo) => {
+    const r = {};
+    results.forEach((x) => { r[x.id] = { grupos: vals(x, "grupos"), subgrupo: vals(x, "subgrupo") }; });
+    setRascunho(r); setModoSub(modo); setOpen(null); setErroLote("");
+  };
+  const cancelarModo = () => { setModoSub(false); setRascunho({}); setErroLote(""); };
+
+  const toggleRascunhoSub = (id, sub) =>
+    setRascunho((prev) => {
+      const atual = (prev[id] && prev[id].subgrupo) || [];
+      return { ...prev, [id]: { ...prev[id],
+        subgrupo: atual.includes(sub) ? atual.filter((s) => s !== sub) : [...atual, sub] } };
+    });
+
+  const toggleRascunhoGrupo = (id, g) =>
+    setRascunho((prev) => {
+      const atual = (prev[id] && prev[id].grupos) || [];
+      return { ...prev, [id]: { ...prev[id],
+        grupos: atual.includes(g) ? atual.filter((x) => x !== g) : [...atual, g] } };
+    });
+
+  const alterados = useMemo(() => results.filter((x) => {
+    const d = rascunho[x.id] || {};
+    const origG = vals(x, "grupos").slice().sort(), novoG = (d.grupos || []).slice().sort();
+    const origS = vals(x, "subgrupo").slice().sort(), novoS = (d.subgrupo || []).slice().sort();
+    return !mesmo(origG, novoG) || !mesmo(origS, novoS);
+  }), [results, rascunho]);
+
+  const salvarLote = async () => {
+    if (!alterados.length) { cancelarModo(); return; }
+    setErroLote("");
+    baixarJSON(`backup-antes-lote-${Date.now()}.json`, alterados);
+    setSalvandoLote({ feito: 0, total: alterados.length, falhas: 0 });
+    let falhas = [];
+    for (let i = 0; i < alterados.length; i++) {
+      const x = alterados[i], d = rascunho[x.id] || {};
+      const patch = {};
+      if (!mesmo(vals(x, "grupos").slice().sort(), (d.grupos || []).slice().sort()))
+        patch.grupos = d.grupos || [];
+      if (!mesmo(vals(x, "subgrupo").slice().sort(), (d.subgrupo || []).slice().sort()))
+        patch.subgrupo = joinVals(d.subgrupo || []);
+      try { await db.cardapioAtualizar(x.id, patch); }
+      catch (e) { falhas.push(`${x.exercicio}: ${e.message}`); }
+      setSalvandoLote({ feito: i + 1, total: alterados.length, falhas: falhas.length });
+    }
+    setSalvandoLote(null);
+    if (falhas.length) setErroLote(`${falhas.length} de ${alterados.length} não salvaram. ${falhas[0]}`);
+    else { setModoSub(false); setRascunho({}); }
+    await carregar();
+  };
+
+  /* ---- remover um grupo de todos ---- */
+  const [removendoGrupo, setRemovendoGrupo] = useState(null);
+  const removerGrupoDeTodos = async (grupoAlvo) => {
+    const afetados = [...lista, ...arquivados].filter((x) => vals(x, "grupos").includes(grupoAlvo));
+    if (!afetados.length) { setRemovendoGrupo(null); return; }
+    baixarJSON(`backup-antes-remover-grupo-${Date.now()}.json`, afetados);
+    setRemovendoGrupo({ feito: 0, total: afetados.length });
+    let falhas = 0;
+    for (let i = 0; i < afetados.length; i++) {
+      const x = afetados[i];
+      try { await db.cardapioAtualizar(x.id, { grupos: vals(x, "grupos").filter((g) => g !== grupoAlvo) }); }
+      catch (e) { falhas++; }
+      setRemovendoGrupo({ feito: i + 1, total: afetados.length });
+    }
+    setRemovendoGrupo(null);
+    if (falhas) setErro(`${falhas} exercício(s) não foram atualizados ao remover "${grupoAlvo}".`);
+    setGruposF((prev) => prev.filter((g) => g !== grupoAlvo));
+    await carregar();
+  };
+
+  /* ---- arquivar ---- */
+  const arquivar = async (x) => {
+    try { await db.cardapioArquivar(x.id); await carregar(); }
+    catch (e) { setErro(String(e.message || e)); }
+  };
+
+  return (
+    <div style={{ paddingBottom: 96 }}>
+
+      {/* Header */}
+      <div style={{ position: "sticky", top: 0, zIndex: 20, background: `${C.bg}f2`,
+        backdropFilter: "blur(10px)", borderBottom: `1px solid ${C.line}`, padding: "14px 14px 10px" }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+          <h1 style={{ margin: 0, fontSize: 19, fontWeight: 700, letterSpacing: "-0.02em" }}>Cardápio de Exercícios</h1>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700,
+            color: results.length ? C.bright : C.muted, lineHeight: 1 }}>
+            {String(results.length).padStart(3, "0")}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar exercício, músculo, equipamento…"
+            style={{ flex: 1, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+              color: C.text, padding: "11px 13px", fontSize: 15, fontFamily: "inherit", outline: "none" }}
+            onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+            onBlur={(e) => (e.target.style.borderColor = C.line)} />
+          {podeEditar && (
+            <>
+              <button onClick={() => setEditing({})} title="Novo exercício"
+                style={{ flex: "0 0 46px", background: C.cyan, border: "none", borderRadius: 10, color: C.bg,
+                  fontSize: 24, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>+</button>
+              <button onClick={() => setGerindo(true)} title="Gerir tags"
+                style={{ flex: "0 0 46px", background: "transparent", border: `1px solid ${C.line}`, borderRadius: 10,
+                  color: C.muted, fontSize: 19, cursor: "pointer", lineHeight: 1 }}>⚙</button>
+              <button onClick={() => setGerindoSub(true)} title="Gerir subgrupos"
+                style={{ flex: "0 0 46px", background: "transparent", border: `1px solid ${C.line}`, borderRadius: 10,
+                  color: C.muted, fontSize: 17, cursor: "pointer", lineHeight: 1 }}>🗂️</button>
+            </>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "10px 0 0", marginRight: -14 }}>
+          {vocab.grupos.map((g) => chipBtn(gruposF.includes(g), () => toggleGrupo(g), "g" + g,
+            gruposFantasma.includes(g) ? `⚠ ${g}` : g))}
+          {activeFilters > 0 && chipBtn(false, clearAll, "clr", "✕ limpar", true)}
+        </div>
+        {subgruposDisponiveis.length > 0 && (
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "8px 0 2px", marginRight: -14,
+            marginLeft: 12, borderLeft: `2px solid ${C.cyan}`, paddingLeft: 10 }}>
+            {subgruposDisponiveis.map((s) =>
+              chipBtn(subgruposF.includes(s), () => toggle(subgruposF, setSubgruposF, s), "sg" + s, s))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "6px 0 0", marginRight: -14 }}>
+          {vocab.equipamento.map((e) => chipBtn(equipF.includes(e), () => toggle(equipF, setEquipF, e), "e" + e, e, true))}
+        </div>
+
+        {erroSub && (
+          <Aviso acao={carregarSub} acaoLabel="Tentar de novo">
+            Subgrupos não carregaram. {erroSub}
+          </Aviso>
+        )}
+        {gruposFantasma.length > 0 && (
+          <Aviso>
+            {gruposFantasma.length} grupo(s) fora da tabela oficial: {gruposFantasma.join(", ")}.
+            Exercício que só tenha esses grupos fica fora do Volume. Criar ou renomear grupo é na Dashboard.
+          </Aviso>
+        )}
+        {erroLote && <Aviso>{erroLote}</Aviso>}
+
+        {podeEditar && !modoSub && grupoUnico && (
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            {subsDoGrupoUnico.length > 0 && (
+              <button onClick={() => ligarModo("sub")}
+                style={{ flex: 1, background: "transparent", border: `1px solid ${C.cyan}`,
+                  color: C.cyan, borderRadius: 10, padding: "9px", fontSize: 12.5, fontWeight: 700,
+                  cursor: "pointer", fontFamily: "inherit" }}>
+                🏷️ Subgrupos em massa
+              </button>
+            )}
+            <button onClick={() => ligarModo("grupo")}
+              style={{ flex: 1, background: "transparent", border: `1px solid ${C.muted}`,
+                color: C.muted, borderRadius: 10, padding: "9px", fontSize: 12.5, fontWeight: 700,
+                cursor: "pointer", fontFamily: "inherit" }}>
+              🔀 Migrar grupo em massa
+            </button>
+          </div>
+        )}
+
+        {podeEditar && !modoSub && grupoUnico && (
+          <div style={{ marginTop: 8 }}>
+            {removendoGrupo && removendoGrupo.total ? (
+              <div style={{ fontSize: 12, color: C.muted, textAlign: "center", padding: "8px" }}>
+                Removendo "{grupoUnico}"… {removendoGrupo.feito}/{removendoGrupo.total}
+              </div>
+            ) : removendoGrupo === "confirmar" ? (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", background: `${C.danger}12`,
+                border: `1px solid ${C.danger}44`, borderRadius: 10, padding: "9px 11px" }}>
+                <span style={{ flex: 1, fontSize: 12, color: C.text, lineHeight: 1.4 }}>
+                  Remover "{grupoUnico}" de {[...lista, ...arquivados].filter((x) => vals(x, "grupos").includes(grupoUnico)).length} exercício(s)? Os outros grupos deles ficam intactos, mas o Volume de todos os alunos muda na hora.
+                </span>
+                <button onClick={() => setRemovendoGrupo(null)}
+                  style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 8,
+                    padding: "6px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Não</button>
+                <button onClick={() => removerGrupoDeTodos(grupoUnico)}
+                  style={{ background: C.danger, border: "none", color: "#fff", borderRadius: 8,
+                    padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Remover</button>
+              </div>
+            ) : (
+              <button onClick={() => setRemovendoGrupo("confirmar")}
+                style={{ width: "100%", background: "transparent", border: `1px solid ${C.danger}66`,
+                  color: C.danger, borderRadius: 10, padding: "8px", fontSize: 12, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit" }}>
+                🗑 Remover grupo "{grupoUnico}" de todos os exercícios
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Barra do modo em massa */}
+      {modoSub && (
+        <div style={{ position: "sticky", top: 0, zIndex: 15, background: C.cyan, color: C.bg,
+          padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, lineHeight: 1.3 }}>
+            {salvandoLote
+              ? `Salvando ${salvandoLote.feito}/${salvandoLote.total}…`
+              : `${modoSub === "grupo" ? "Migrar grupo" : "Atribuir subgrupos"} · ${grupoUnico} · ${alterados.length} alterado(s)`}
+          </div>
+          {!salvandoLote && (
+            <div style={{ display: "flex", gap: 8, flex: "0 0 auto", alignItems: "center" }}>
+              <span style={{ fontSize: 10.5, fontWeight: 600, opacity: 0.85, maxWidth: 150, lineHeight: 1.25 }}>
+                Muda o Volume de todos os alunos na hora
+              </span>
+              <button onClick={cancelarModo}
+                style={{ background: "transparent", border: `1px solid ${C.bg}55`, color: C.bg,
+                  borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                Cancelar
+              </button>
+              <button onClick={salvarLote} disabled={!alterados.length}
+                style={{ background: C.bg, border: "none", color: C.cyan, borderRadius: 8,
+                  padding: "6px 14px", fontSize: 12.5, fontWeight: 700,
+                  cursor: alterados.length ? "pointer" : "default", opacity: alterados.length ? 1 : 0.5, fontFamily: "inherit" }}>
+                Salvar {alterados.length || ""}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Estados */}
+      {loading && (
+        <div style={{ padding: "60px 24px", textAlign: "center", color: C.muted }}>
+          <div style={{ width: 26, height: 26, border: `3px solid ${C.line}`, borderTopColor: C.cyan,
+            borderRadius: "50%", margin: "0 auto 14px", animation: "spin .8s linear infinite" }} />
+          Carregando exercícios…
+        </div>
+      )}
+      {erro && !loading && (
+        <div style={{ padding: "40px 24px", textAlign: "center" }}>
+          <div style={{ color: C.danger, marginBottom: 10 }}>Não consegui carregar o cardápio.</div>
+          <div style={{ color: C.muted, fontSize: 12, marginBottom: 16, wordBreak: "break-word" }}>{erro}</div>
+          <button onClick={carregar} style={{ background: C.cyan, border: "none", color: C.bg,
+            borderRadius: 8, padding: "9px 16px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+            Tentar de novo
+          </button>
+        </div>
+      )}
+
+      {!loading && !erro && !modoSub && gruposSugeridos.length > 0 && (
+        <div style={{ padding: "12px 14px 6px" }}>
+          <div style={{ fontSize: 10, letterSpacing: "0.16em", color: C.muted, textTransform: "uppercase", marginBottom: 8 }}>
+            Ir para a categoria
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {gruposSugeridos.map((g) => (
+              <button key={g} onClick={() => aplicarTagGrupo(g)}
+                style={{ background: C.cyan, color: C.bg, border: "none", borderRadius: 999,
+                  padding: "8px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", gap: 7 }}>
+                <span style={{ fontSize: 11 }}>▸</span> {g}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!loading && !erro && results.length === 0 && gruposSugeridos.length === 0 && (
+        <div style={{ padding: "60px 24px", textAlign: "center", color: C.muted }}>
+          <div style={{ fontSize: 15, marginBottom: 8, color: C.text }}>Nenhum exercício com esses filtros.</div>
+          <button onClick={clearAll} style={{ background: "none", border: `1px solid ${C.line}`, color: C.cyan,
+            borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontFamily: "inherit" }}>Limpar filtros</button>
+        </div>
+      )}
+
+      {/* Lista */}
+      {!loading && !erro && results.map((x) => {
+        const picked = inPrancheta(x.id);
+        const isOpen = open === x.id;
+        const gs = vals(x, "grupos"), es = vals(x, "equipamento"), sgs = vals(x, "subgrupo");
+        return (
+          <div key={x.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+            <div className="row" style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px" }}>
+              <button onClick={() => addPick(x)} aria-label="prancheta"
+                style={{ flex: "0 0 22px", height: 22, borderRadius: 6,
+                  border: `1.5px solid ${picked ? C.cyan : C.line}`, background: picked ? C.cyan : "transparent",
+                  color: C.bg, fontSize: 13, fontWeight: 700, lineHeight: "19px", cursor: "pointer", padding: 0 }}>
+                {picked ? "✓" : ""}
+              </button>
+              <div style={{ flex: 1, minWidth: 0 }} onClick={() => { if (!modoSub) setOpen(isOpen ? null : x.id); }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  {x.video_proprio && <span title="Vídeo próprio" style={{ width: 6, height: 6, borderRadius: 9, background: C.bright, flex: "0 0 6px" }} />}
+                  <span style={{ fontSize: 14.5, fontWeight: 500, lineHeight: 1.25 }}>{x.exercicio}</span>
+                </div>
+                <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
+                  {gs.join(" · ")}
+                  {sgs.length ? "  ›  " + sgs.join(" · ") : ""}
+                  {es.length ? "  —  " + es.join(", ") : ""}
+                  {x.em_casa ? "  ·  🏠" : ""}
+                </div>
+              </div>
+              {x.video_url && (
+                <a href={x.video_url} target="_blank" rel="noopener noreferrer"
+                  onClick={(ev) => ev.stopPropagation()} title="Assistir vídeo"
+                  style={{ flex: "0 0 auto", color: C.bright, fontSize: 16, padding: 4,
+                    textDecoration: "none", lineHeight: 1 }}>▶</a>
+              )}
+              {podeEditar && (
+                <button onClick={() => setEditing(x)} title="Editar"
+                  style={{ flex: "0 0 auto", background: "none", border: "none", color: C.muted,
+                    fontSize: 15, cursor: "pointer", padding: 4 }}>✎</button>
+              )}
+            </div>
+
+            {modoSub === "sub" && (
+              <div style={{ padding: "0 14px 12px 46px", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {subsDoGrupoUnico.map((s) => {
+                  const on = ((rascunho[x.id] && rascunho[x.id].subgrupo) || []).includes(s);
+                  return chipBtn(on, () => toggleRascunhoSub(x.id, s), s, s);
+                })}
+              </div>
+            )}
+            {modoSub === "grupo" && (
+              <div style={{ padding: "0 14px 12px 46px", display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {gruposOficiais.map((g) => {
+                  const on = ((rascunho[x.id] && rascunho[x.id].grupos) || []).includes(g);
+                  return chipBtn(on, () => toggleRascunhoGrupo(x.id, g), g, g);
+                })}
+              </div>
+            )}
+
+            {isOpen && (
+              <div style={{ background: C.surface, padding: "12px 14px 14px 46px", fontSize: 12.5, color: C.muted, lineHeight: 1.65 }}>
+                {sgs.length > 0 && <div><span style={{ color: C.cyan }}>Categoria</span> · {sgs.join(" | ")}</div>}
+                {vals(x, "musculo_alvo").length > 0 && <div><span style={{ color: C.cyan }}>Alvo terapêutico</span> · {vals(x, "musculo_alvo").join(" | ")}</div>}
+                {x.observacao && <div><span style={{ color: C.cyan }}>Obs</span> · {x.observacao}</div>}
+                {x.video_url && (
+                  <div style={{ marginTop: 6 }}>
+                    <a href={x.video_url} target="_blank" rel="noopener noreferrer"
+                      onClick={(ev) => ev.stopPropagation()}
+                      style={{ color: C.bright, textDecoration: "none", fontWeight: 700 }}>
+                      ▶ Assistir vídeo
+                    </a>
+                  </div>
+                )}
+                <div style={{ marginTop: 4 }}>
+                  {x.isometrico ? "Isométrico · " : ""}
+                  {x.unilateral ? "Unilateral · " : ""}
+                  {x.a_filmar ? "A filmar" : ""}
+                </div>
+                <div style={{ marginTop: 6, fontSize: 10.5, opacity: 0.8 }}>
+                  id {x.id}{x.sincronizado_em ? " · atualizado " + new Date(x.sincronizado_em).toLocaleString("pt-BR") : ""}
+                </div>
+                {podeEditar && (
+                  <button onClick={() => arquivar(x)}
+                    style={{ marginTop: 8, background: "none", border: `1px solid ${C.danger}55`, color: C.danger,
+                      borderRadius: 8, padding: "6px 11px", fontSize: 11.5, cursor: "pointer", fontFamily: "inherit" }}>
+                    📦 Arquivar exercício
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Rodapé: arquivados */}
+      {!loading && !erro && (
+        <div style={{ padding: "18px 14px 10px", textAlign: "center" }}>
+          <button onClick={() => setVerArquivados(true)}
+            style={{ background: "none", border: `1px solid ${C.line}`, color: C.muted, borderRadius: 9,
+              padding: "8px 14px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+            📦 Arquivados ({arquivados.length})
+          </button>
+        </div>
+      )}
+
+      {/* Prancheta */}
+      {prancheta.length > 0 && (
+        <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 30, background: C.surface,
+          borderTop: `1px solid ${C.cyan}`, boxShadow: "0 -18px 40px rgba(0,0,0,.6)" }}>
+          {sheetOpen && (
+            <div style={{ maxHeight: 240, overflowY: "auto", borderBottom: `1px solid ${C.line}` }}>
+              {prancheta.map((x, k) => (
+                <div key={x.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", borderBottom: `1px solid ${C.bg}` }}>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.muted, width: 18 }}>{String(k + 1).padStart(2, "0")}</span>
+                  <span style={{ flex: 1, fontSize: 13.5 }}>{x.exercicio}</span>
+                  <button onClick={() => addPick(x)} style={{ background: "none", border: "none", color: C.muted, fontSize: 16, cursor: "pointer" }}>×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px" }}>
+            <button onClick={() => setSheetOpen(!sheetOpen)} style={{ flex: 1, textAlign: "left", background: "none", border: "none", color: C.text, cursor: "pointer", fontFamily: "inherit", padding: 0 }}>
+              <div style={{ fontSize: 9.5, letterSpacing: "0.2em", color: C.cyan, fontWeight: 700 }}>PRANCHETA</div>
+              <div style={{ fontSize: 14, fontWeight: 500 }}>{prancheta.length} exercício{prancheta.length > 1 ? "s" : ""} {sheetOpen ? "▾" : "▴"}</div>
+            </button>
+            <button onClick={() => setPrancheta([])} style={{ background: "none", border: `1px solid ${C.line}`, color: C.muted, borderRadius: 8, padding: "9px 12px", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>Limpar</button>
+            <button onClick={copiar} style={{ background: C.cyan, border: "none", color: C.bg, borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>{copied ? "Copiado ✓" : "Copiar lista"}</button>
+          </div>
+        </div>
+      )}
+
+      {/* Modais */}
+      {editing !== null && (
+        <EditorModal
+          registro={editing}
+          vocab={vocab}
+          gruposOficiais={gruposOficiais}
+          infoGrupo={infoGrupo}
+          subsPorGrupoCurado={subsPorGrupoCurado}
+          erroSub={erroSub}
+          onClose={() => setEditing(null)}
+          onSaved={async () => { setEditing(null); await carregar(); }}
+        />
+      )}
+      {gerindo && (
+        <GerirTags
+          lista={[...lista, ...arquivados]}
+          vocab={vocab}
+          onClose={() => setGerindo(false)}
+          onChanged={carregar}
+        />
+      )}
+      {gerindoSub && (
+        <GerirSubgrupos
+          grupos={gruposOficiais}
+          subCurados={subCurados}
+          onClose={() => setGerindoSub(false)}
+          onChanged={carregarSub}
+        />
+      )}
+      {verArquivados && (
+        <Arquivados
+          itens={arquivados}
+          onClose={() => setVerArquivados(false)}
+          onChanged={carregar}
+        />
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   ARQUIVADOS — restaurar ou excluir de vez (só se não houver uso)
+   ========================================================================= */
+function Arquivados({ itens, onClose, onChanged }) {
+  const [busy, setBusy] = useState(null);
+  const [erro, setErro] = useState("");
+  const [confirmando, setConfirmando] = useState(null); // {id, usos}
+
+  const restaurar = async (x) => {
+    setBusy(x.id); setErro("");
+    try { await db.cardapioRestaurar(x.id); await onChanged(); }
+    catch (e) { setErro(String(e.message || e)); }
+    setBusy(null);
+  };
+
+  const pedirExclusao = async (x) => {
+    setBusy(x.id); setErro("");
+    try {
+      const usos = await db.cardapioUsos(x.id);
+      setConfirmando({ id: x.id, nome: x.exercicio, usos });
+    } catch (e) { setErro(String(e.message || e)); }
+    setBusy(null);
+  };
+
+  const excluir = async (x) => {
+    setBusy(x.id); setErro("");
+    try { await db.cardapioExcluirDefinitivo(x.id); setConfirmando(null); await onChanged(); }
+    catch (e) { setErro(String(e.message || e)); }
+    setBusy(null);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 55, background: "rgba(0,0,0,.7)",
+      display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.bg, width: "100%", maxWidth: 640,
+        maxHeight: "92vh", overflowY: "auto", borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        border: `1px solid ${C.line}`, padding: "18px 16px 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Arquivados</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+        <p style={{ fontSize: 12, color: C.muted, marginTop: 0, marginBottom: 16, lineHeight: 1.5 }}>
+          Exercícios arquivados somem da busca, mas os treinos de quem já usou continuam inteiros.
+        </p>
+
+        {erro && <Aviso>{erro}</Aviso>}
+
+        {itens.length === 0 && (
+          <div style={{ fontSize: 13, color: C.muted, fontStyle: "italic", padding: "10px 0" }}>
+            Nenhum exercício arquivado.
+          </div>
+        )}
+
+        {itens.map((x) => {
+          const conf = confirmando && confirmando.id === x.id ? confirmando : null;
+          const emUso = conf && (conf.usos.total > 0 || conf.usos.incerto);
+          return (
+            <div key={x.id} style={{ borderBottom: `1px solid ${C.line}`, padding: "11px 0" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14 }}>{x.exercicio}</div>
+                  <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>
+                    id {x.id} · arquivado {new Date(x.arquivado_em).toLocaleDateString("pt-BR")}
+                  </div>
+                </div>
+                <button onClick={() => restaurar(x)} disabled={busy === x.id}
+                  style={{ background: "none", border: `1px solid ${C.cyan}66`, color: C.cyan, borderRadius: 8,
+                    padding: "6px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Restaurar</button>
+                <button onClick={() => pedirExclusao(x)} disabled={busy === x.id}
+                  style={{ background: "none", border: `1px solid ${C.danger}55`, color: C.danger, borderRadius: 8,
+                    padding: "6px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Excluir</button>
+              </div>
+
+              {conf && (
+                <div style={{ marginTop: 9, background: `${emUso ? C.danger : C.cyan}12`,
+                  border: `1px solid ${emUso ? C.danger : C.cyan}44`, borderRadius: 9, padding: "9px 11px" }}>
+                  {emUso ? (
+                    <div style={{ fontSize: 12, color: C.text, lineHeight: 1.5 }}>
+                      Não dá para excluir: {conf.usos.incerto
+                        ? "não consegui verificar se este exercício está em uso."
+                        : `está em ${conf.usos.exercicios} treino(s), ${conf.usos.checkins} check-in(s) e ${conf.usos.protocolos} protocolo(s).`}
+                      {" "}Ele continua arquivado.
+                      <div style={{ marginTop: 8 }}>
+                        <button onClick={() => setConfirmando(null)}
+                          style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 8,
+                            padding: "6px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Entendi</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: C.text, lineHeight: 1.5 }}>
+                      Nunca foi usado em treino, check-in ou protocolo. Excluir de vez? Não dá para desfazer.
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button onClick={() => setConfirmando(null)}
+                          style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 8,
+                            padding: "6px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>Cancelar</button>
+                        <button onClick={() => excluir(x)} disabled={busy === x.id}
+                          style={{ background: C.danger, border: "none", color: "#fff", borderRadius: 8,
+                            padding: "6px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                          Excluir de vez
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   GERIR TAGS — renomear / excluir em massa (com backup JSON antes)
+   ========================================================================= */
+function GerirTags({ lista, vocab, onClose, onChanged }) {
+  const CAMPOS = [
+    { k: "grupos", label: "Grupos" },
+    { k: "equipamento", label: "Equipamentos" },
+    { k: "subgrupo", label: "Categorias" },
+    { k: "musculo_alvo", label: "Alvos terapêuticos" },
+  ];
+  const [campo, setCampo] = useState("grupos");
+  const [busca, setBusca] = useState("");
+  const [msg, setMsg] = useState("");
+  const [erro, setErro] = useState("");
+  const [progresso, setProgresso] = useState(null);
+
+  const contagem = useMemo(() => {
+    const m = {};
+    lista.forEach((x) => vals(x, campo).forEach((v) => (m[v] = (m[v] || 0) + 1)));
+    return m;
+  }, [lista, campo]);
+
+  const tags = useMemo(() => {
+    const nb = strip(busca);
+    return (vocab[campo] || [])
+      .filter((t) => !nb || strip(t).includes(nb))
+      .sort((a, b) => (contagem[b] || 0) - (contagem[a] || 0) || a.localeCompare(b, "pt"));
+  }, [vocab, campo, busca, contagem]);
+
+  // aplica uma transformação em todos os exercícios que têm a tag
+  const aplicar = async (tag, transformar, rotulo) => {
+    const afetados = lista.filter((x) => vals(x, campo).includes(tag));
+    if (!afetados.length) { setMsg("Nenhum exercício usa essa tag."); return; }
+    setMsg(""); setErro("");
+    baixarJSON(`backup-${rotulo}-${Date.now()}.json`, afetados);
+    setProgresso({ feito: 0, total: afetados.length });
+    let falhas = [];
+    for (let i = 0; i < afetados.length; i++) {
+      const x = afetados[i];
+      const novos = transformar(vals(x, campo));
+      const patch = CAMPOS_ARRAY.includes(campo) ? { [campo]: novos } : { [campo]: joinVals(novos) };
+      try { await db.cardapioAtualizar(x.id, patch); }
+      catch (e) { falhas.push(`${x.exercicio}: ${e.message}`); }
+      setProgresso({ feito: i + 1, total: afetados.length });
+    }
+    setProgresso(null);
+    await onChanged();
+    if (falhas.length) setErro(`${falhas.length} de ${afetados.length} não salvaram. ${falhas[0]}`);
+    return { total: afetados.length, falhas: falhas.length };
+  };
+
+  const renomear = async (tag) => {
+    if (campo === "grupos") return; // grupo não se renomeia por aqui (ver aviso na tela)
+    const novo = (prompt(`Renomear "${tag}" para:`, tag) || "").trim();
+    if (!novo || novo === tag) return;
+    const r = await aplicar(tag, (atuais) => {
+      const out = atuais.map((v) => (v === tag ? novo : v));
+      return [...new Set(out)];
+    }, "renomear-tag");
+    // categoria também vive na tabela subgrupos: renomeia lá no mesmo movimento,
+    // senão a lista curada e o cardápio ficam falando línguas diferentes
+    if (campo === "subgrupo") {
+      try { await db.subRenomear(tag, novo); }
+      catch (e) { setErro(`Exercícios renomeados, mas a lista curada de subgrupos não: ${e.message}`); }
+    }
+    if (r) setMsg(`"${tag}" → "${novo}" em ${r.total - r.falhas} exercício(s). ✓`);
+  };
+
+  const excluir = async (tag) => {
+    const n = contagem[tag] || 0;
+    const ok = confirm(
+      `Excluir a tag "${tag}"?\n\nEla será removida de ${n} exercício(s). Os exercícios continuam existindo, só perdem essa tag.` +
+      (campo === "subgrupo"
+        ? `\n\nAtenção: categoria é o rótulo de linha do Volume nos grupos que quebram por subgrupo.`
+        : "") +
+      `\n\n(Um backup JSON é baixado antes.)`
+    );
+    if (!ok) return;
+    const r = await aplicar(tag, (atuais) => atuais.filter((v) => v !== tag), "excluir-tag");
+    if (r) setMsg(`"${tag}" removida de ${r.total - r.falhas} exercício(s). ✓`);
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 60, background: C.bg, overflowY: "auto" }}>
+      <div style={{ position: "sticky", top: 0, background: `${C.bg}f5`, backdropFilter: "blur(10px)",
+        borderBottom: `1px solid ${C.line}`, padding: "16px 16px 12px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 9.5, letterSpacing: "0.22em", color: C.cyan, fontWeight: 700 }}>GERIR</div>
+            <h2 style={{ margin: "2px 0 0", fontSize: 19, fontWeight: 700 }}>Tags</h2>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: `1px solid ${C.line}`, color: C.text,
+            borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontFamily: "inherit", fontSize: 14 }}>
+            ✓ Concluir
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", marginRight: -16, paddingBottom: 2 }}>
+          {CAMPOS.map((c) => chipBtn(campo === c.k, () => { setCampo(c.k); setMsg(""); setErro(""); }, c.k, c.label))}
+        </div>
+        <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Filtrar tags…"
+          style={{ width: "100%", marginTop: 10, background: C.surface, border: `1px solid ${C.line}`,
+            borderRadius: 9, color: C.text, padding: "9px 12px", fontSize: 14, fontFamily: "inherit", outline: "none" }} />
+      </div>
+
+      {msg && (
+        <div style={{ padding: "10px 16px", background: C.surface2, color: C.bright, fontSize: 13,
+          borderBottom: `1px solid ${C.line}` }}>{msg}</div>
+      )}
+      {erro && <div style={{ padding: "0 16px" }}><Aviso>{erro}</Aviso></div>}
+      {progresso && (
+        <div style={{ padding: "10px 16px", color: C.muted, fontSize: 13 }}>
+          Aplicando… {progresso.feito}/{progresso.total}
+        </div>
+      )}
+
+      {campo === "grupos" && (
+        <div style={{ padding: "12px 16px", background: `${C.danger}10`, borderBottom: `1px solid ${C.line}`,
+          fontSize: 12, color: C.text, lineHeight: 1.55 }}>
+          Grupo não se renomeia nem se exclui aqui. O nome do grupo é a chave que liga o cardápio
+          à tabela oficial do Volume: mudar só de um lado derruba todos esses exercícios para
+          "Sem atribuição" no Volume de todos os alunos, sem avisar.
+          Essa mudança precisa acontecer nos dois lugares ao mesmo tempo, pela Dashboard.
+          Aqui a lista serve para conferir quantos exercícios usam cada grupo.
+        </div>
+      )}
+
+      <div>
+        {tags.map((tag) => (
+          <div key={tag} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
+            borderBottom: `1px solid ${C.line}` }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14.5 }}>{tag}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{contagem[tag] || 0} exercício(s)</div>
+            </div>
+            {campo === "grupos" ? (
+              <span style={{ fontSize: 11.5, color: C.muted }}>só na Dashboard</span>
+            ) : (
+              <>
+                <button onClick={() => renomear(tag)} disabled={!!progresso}
+                  style={{ background: "none", border: `1px solid ${C.line}`, color: C.text, borderRadius: 7,
+                    padding: "6px 12px", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>Renomear</button>
+                <button onClick={() => excluir(tag)} disabled={!!progresso}
+                  style={{ background: "none", border: `1px solid ${C.danger}44`, color: C.danger, borderRadius: 7,
+                    padding: "6px 12px", fontSize: 12.5, cursor: "pointer", fontFamily: "inherit" }}>Excluir</button>
+              </>
+            )}
+          </div>
+        ))}
+        {tags.length === 0 && (
+          <div style={{ padding: "40px 24px", textAlign: "center", color: C.muted }}>Nenhuma tag encontrada.</div>
+        )}
+        <div style={{ height: 40 }} />
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   GERIR SUBGRUPOS (tabela subgrupos)
+   ========================================================================= */
+function GerirSubgrupos({ grupos, subCurados, onClose, onChanged }) {
+  const [grupoSel, setGrupoSel] = useState(grupos[0] || "");
+  const [novo, setNovo] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [erro, setErro] = useState("");
+
+  const doGrupo = subCurados
+    .filter((o) => String(o.grupo).trim() === String(grupoSel).trim())
+    .sort((a, b) => (a.ordem || 0) - (b.ordem || 0) ||
+      String(a.subgrupo).localeCompare(String(b.subgrupo), "pt"));
+
+  const adicionar = async () => {
+    const val = novo.trim();
+    if (!val || !grupoSel) return;
+    setBusy(true); setErro("");
+    try { await db.subCriar(grupoSel, val); setNovo(""); await onChanged(); }
+    catch (e) {
+      setErro(/duplicate key|unique/i.test(e.message)
+        ? `"${val}" já existe em ${grupoSel}.` : String(e.message || e));
+    }
+    setBusy(false);
+  };
+
+  const excluir = async (id) => {
+    setBusy(true); setErro("");
+    try { await db.subExcluir(id); await onChanged(); }
+    catch (e) { setErro(String(e.message || e)); }
+    setBusy(false);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,.7)",
+      display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.bg, width: "100%", maxWidth: 640,
+        maxHeight: "92vh", overflowY: "auto", borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        border: `1px solid ${C.line}`, padding: "18px 16px 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Gerir subgrupos</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+        <p style={{ fontSize: 12, color: C.muted, marginTop: 0, marginBottom: 16, lineHeight: 1.5 }}>
+          Defina os subgrupos de cada grupo. Só os que você criar aqui aparecem no filtro do Cardápio.
+        </p>
+
+        <label style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700, textTransform: "uppercase", marginBottom: 7, display: "block" }}>Grupo</label>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 18 }}>
+          {grupos.map((g) => chipBtn(grupoSel === g, () => setGrupoSel(g), g, g))}
+        </div>
+
+        <label style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700, textTransform: "uppercase", marginBottom: 7, display: "block" }}>
+          Subgrupos de {grupoSel || "—"}
+        </label>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <input value={novo} onChange={(e) => setNovo(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") adicionar(); }}
+            placeholder="Ex.: Retos, Oblíquos, Isométricos…"
+            style={{ flex: 1, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+              color: C.text, padding: "11px 13px", fontSize: 15, fontFamily: "inherit", outline: "none" }}
+            onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+            onBlur={(e) => (e.target.style.borderColor = C.line)} />
+          <button onClick={adicionar} disabled={busy || !novo.trim()}
+            style={{ flex: "0 0 auto", background: busy ? C.line : C.cyan, border: "none", borderRadius: 10,
+              color: C.bg, fontSize: 14, fontWeight: 700, padding: "0 16px", cursor: "pointer", fontFamily: "inherit" }}>
+            + add
+          </button>
+        </div>
+
+        {erro && <Aviso>{erro}</Aviso>}
+
+        {doGrupo.length === 0 ? (
+          <div style={{ fontSize: 13, color: C.muted, fontStyle: "italic", padding: "6px 0" }}>
+            Nenhum subgrupo definido para {grupoSel || "este grupo"} ainda.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {doGrupo.map((o) => (
+              <div key={o.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between",
+                background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10, padding: "9px 12px" }}>
+                <span style={{ fontSize: 14 }}>{o.subgrupo}</span>
+                <button onClick={() => excluir(o.id)} disabled={busy} title="Excluir"
+                  style={{ background: "none", border: "none", color: C.danger, fontSize: 15,
+                    cursor: "pointer", padding: 2 }}>🗑</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   EDITOR DE EXERCÍCIO
+   ========================================================================= */
+function EditorModal({ registro, vocab, gruposOficiais = [], infoGrupo = {},
+                      subsPorGrupoCurado = {}, erroSub = "", onClose, onSaved }) {
+  const isEdit = !!registro.id;
+  const [nome, setNome] = useState(registro.exercicio || "");
+  const [videoUrl, setVideoUrl] = useState(registro.video_url || "");
+  const [obs, setObs] = useState(registro.observacao || "");
+  const [sel, setSel] = useState({
+    grupos: vals(registro, "grupos"),
+    subgrupo: vals(registro, "subgrupo"),
+    equipamento: vals(registro, "equipamento"),
+    musculo_alvo: vals(registro, "musculo_alvo"),
+  });
+  const [flags, setFlags] = useState(() => {
+    const o = {};
+    FLAG_FIELDS.forEach((f) => (o[f.k] = registro[f.k] === true));
+    return o;
+  });
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState("");
+  const [confirmaAmbiguo, setConfirmaAmbiguo] = useState(false);
+
+  // como a view vw_exercicios_resolvidos vai enxergar este exercício
+  const volume = useMemo(() => avaliarVolume(sel.grupos, infoGrupo), [sel.grupos, infoGrupo]);
+  const semSubgrupoNaQuebra = volume.quebraSub && sel.subgrupo.length === 0;
+
+  const toggleSel = (field, val) => {
+    setConfirmaAmbiguo(false);
+    setSel((s) => ({ ...s,
+      [field]: s[field].includes(val) ? s[field].filter((v) => v !== val) : [...s[field], val] }));
+  };
+
+  const addNova = (field) => {
+    const val = (prompt("Nova tag para " + LABELS[field] + ":") || "").trim();
+    if (val && !sel[field].includes(val)) toggleSel(field, val);
+  };
+
+  const salvar = async () => {
+    if (!nome.trim()) { setErro("Dá um nome pro exercício 🙂"); return; }
+    if (sel.grupos.length === 0) { setErro("Escolhe pelo menos um grupo."); return; }
+    if (volume.estado !== "ok" && !confirmaAmbiguo) {
+      setConfirmaAmbiguo(true);
+      setErro("Com esses grupos o exercício fica fora do total do Volume. Toque de novo em salvar para gravar assim mesmo.");
+      return;
+    }
+    setSalvando(true); setErro("");
+
+    const completo = {
+      exercicio: nome.trim(),
+      grupos: sel.grupos,
+      subgrupo: joinVals(sel.subgrupo),
+      equipamento: joinVals(sel.equipamento),
+      musculo_alvo: joinVals(sel.musculo_alvo),
+      observacao: txtOuNull(obs),
+      video_url: txtOuNull(videoUrl),
+    };
+    FLAG_FIELDS.forEach((f) => (completo[f.k] = !!flags[f.k]));
+
+    try {
+      if (isEdit) {
+        // só o que mudou (bi_set, bruto e contextos nunca são tocados)
+        const patch = {};
+        Object.keys(completo).forEach((k) => {
+          const atual = k === "grupos" ? vals(registro, "grupos")
+            : FLAG_FIELDS.some((f) => f.k === k) ? registro[k] === true
+            : (registro[k] ?? null);
+          if (!mesmo(atual, completo[k])) patch[k] = completo[k];
+        });
+        if (Object.keys(patch).length === 0) { onClose(); return; }
+        await db.cardapioAtualizar(registro.id, patch);
+      } else {
+        await db.cardapioCriar(completo);
+      }
+      await onSaved();
+    } catch (e) {
+      setErro(String(e.message || e));
+      setSalvando(false);
+    }
+  };
+
+  const subgruposCuradosDoExercicio = useMemo(() => {
+    const s = new Set();
+    sel.grupos.forEach((g) => (subsPorGrupoCurado[g] || []).forEach((sub) => s.add(sub)));
+    return [...s].sort((a, b) => a.localeCompare(b, "pt"));
+  }, [sel.grupos, subsPorGrupoCurado]);
+
+  const subgruposOrfaos = sel.subgrupo.filter((s) => !subgruposCuradosDoExercicio.includes(s));
+
+  const secao = (field) => (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+        <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700, textTransform: "uppercase" }}>{LABELS[field]}</span>
+        <button onClick={() => addNova(field)} style={{ background: "none", border: `1px solid ${C.line}`, color: C.muted, borderRadius: 7, padding: "3px 9px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>+ nova</button>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {[...new Set([...(vocab[field] || []), ...sel[field]])]
+          .sort((a, b) => a.localeCompare(b, "pt"))
+          .map((val) => chipBtn(sel[field].includes(val), () => toggleSel(field, val), val, val))}
+      </div>
+    </div>
+  );
+
+  // Grupo é escolha fechada: só o que existe em grupos_exibicao.
+  // Texto livre criaria grupo fantasma, invisível para o Volume.
+  const gruposOrfaos = sel.grupos.filter((g) => !infoGrupo[g]);
+  const secaoGrupos = () => (
+    <div style={{ marginBottom: 16 }}>
+      <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700, textTransform: "uppercase" }}>Grupo</span>
+      <div style={{ fontSize: 11, color: C.muted, margin: "4px 0 8px", lineHeight: 1.45 }}>
+        Lista oficial, a mesma que a Dashboard usa no Volume. Grupo novo se cria na Dashboard.
+      </div>
+      {gruposOficiais.length === 0 ? (
+        <div style={{ fontSize: 12, color: C.danger, fontStyle: "italic" }}>
+          Não consegui carregar a lista oficial de grupos. Feche e abra o app antes de editar.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {gruposOficiais.map((val) =>
+            chipBtn(sel.grupos.includes(val), () => toggleSel("grupos", val), val, val))}
+        </div>
+      )}
+
+      {gruposOrfaos.length > 0 && (
+        <div style={{ marginTop: 10, padding: "8px 10px", background: `${C.danger}12`,
+          border: `1px solid ${C.danger}44`, borderRadius: 8 }}>
+          <div style={{ fontSize: 10.5, color: C.danger, fontWeight: 700, marginBottom: 6 }}>
+            Fora da lista oficial, invisível no Volume (clique pra remover):
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {gruposOrfaos.map((val) => (
+              <button key={val} onClick={() => toggleSel("grupos", val)}
+                style={{ background: "transparent", color: C.text, border: `1px solid ${C.danger}66`,
+                  borderRadius: 999, padding: "5px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                {val} ✕
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* como o Volume vai enxergar este exercício */}
+      {sel.grupos.length > 0 && (
+        <div style={{ marginTop: 10, padding: "9px 11px", borderRadius: 8,
+          background: volume.estado === "ok" ? `${C.cyan}10` : `${C.danger}12`,
+          border: `1px solid ${volume.estado === "ok" ? C.cyan + "44" : C.danger + "44"}` }}>
+          <div style={{ fontSize: 11.5, color: C.text, lineHeight: 1.5 }}>
+            {volume.estado === "ok" ? (
+              <>No Volume, entra na linha <b>{volume.linha}</b>.</>
+            ) : (
+              <><b>Fica fora do total do Volume:</b> {volume.motivo}.</>
+            )}
+          </div>
+          {semSubgrupoNaQuebra && (
+            <div style={{ fontSize: 11.5, color: C.text, lineHeight: 1.5, marginTop: 6 }}>
+              <b>{volume.vencedor}</b> quebra o Volume por categoria. Sem categoria, este exercício aparece sem rótulo de linha.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const secaoSubgrupo = () => (
+    <div style={{ marginBottom: 16 }}>
+      <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700, textTransform: "uppercase" }}>Categoria</span>
+      {sel.grupos.length === 0 ? (
+        <div style={{ fontSize: 12, color: C.muted, fontStyle: "italic", marginTop: 7 }}>
+          Escolha um grupo primeiro pra ver os subgrupos dele.
+        </div>
+      ) : subgruposCuradosDoExercicio.length === 0 ? (
+        <div style={{ fontSize: 12, color: erroSub ? C.danger : C.muted, fontStyle: "italic", marginTop: 7 }}>
+          {erroSub
+            ? `Não consegui carregar os subgrupos (${erroSub}).`
+            : `Nenhum subgrupo definido para ${sel.grupos.join(", ")}. Crie em 🗂️ Gerir subgrupos.`}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 }}>
+          {subgruposCuradosDoExercicio.map((val) =>
+            chipBtn(sel.subgrupo.includes(val), () => toggleSel("subgrupo", val), val, val))}
+        </div>
+      )}
+
+      {subgruposOrfaos.length > 0 && (
+        <div style={{ marginTop: 10, padding: "8px 10px", background: `${C.danger}12`,
+          border: `1px solid ${C.danger}44`, borderRadius: 8 }}>
+          <div style={{ fontSize: 10.5, color: C.danger, fontWeight: 700, marginBottom: 6 }}>
+            Fora da lista curada (clique pra remover deste exercício):
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {subgruposOrfaos.map((val) => (
+              <button key={val} onClick={() => toggleSel("subgrupo", val)}
+                style={{ background: "transparent", color: C.text, border: `1px solid ${C.danger}66`,
+                  borderRadius: 999, padding: "5px 11px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+                {val} ✕
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,.7)",
+      display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.bg, width: "100%", maxWidth: 640,
+        maxHeight: "92vh", overflowY: "auto", borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        border: `1px solid ${C.line}`, padding: "18px 16px 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{isEdit ? "Editar exercício" : "Novo exercício"}</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+
+        <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nome do exercício"
+          style={{ width: "100%", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+            color: C.text, padding: "12px 13px", fontSize: 16, fontFamily: "inherit", outline: "none", marginBottom: 18 }}
+          onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+          onBlur={(e) => (e.target.style.borderColor = C.line)} />
+
+        <div style={{ marginBottom: 18 }}>
+          <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700,
+            textTransform: "uppercase", marginBottom: 7, display: "block" }}>🎬 Vídeo</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)}
+              placeholder="Cole o link do YouTube (não listado)"
+              style={{ flex: 1, minWidth: 0, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+                color: C.text, padding: "11px 13px", fontSize: 14, fontFamily: "inherit", outline: "none" }}
+              onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+              onBlur={(e) => (e.target.style.borderColor = C.line)} />
+            {videoUrl.trim() && (
+              <a href={videoUrl.trim()} target="_blank" rel="noopener noreferrer" title="Abrir vídeo"
+                style={{ flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center",
+                  background: C.cyan, color: C.bg, borderRadius: 10, padding: "0 16px",
+                  fontSize: 16, fontWeight: 700, textDecoration: "none" }}>▶</a>
+            )}
+          </div>
+        </div>
+
+        {secaoGrupos()}
+        {secaoSubgrupo()}
+        {secao("equipamento")}
+        {secao("musculo_alvo")}
+
+        <div style={{ marginBottom: 18 }}>
+          <span style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700,
+            textTransform: "uppercase", marginBottom: 7, display: "block" }}>Observação</span>
+          <textarea value={obs} onChange={(e) => setObs(e.target.value)} rows={2}
+            placeholder="Ajuste de banco, cuidado específico, variação…"
+            style={{ width: "100%", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+              color: C.text, padding: "11px 13px", fontSize: 14, fontFamily: "inherit", outline: "none",
+              resize: "vertical", lineHeight: 1.5 }}
+            onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+            onBlur={(e) => (e.target.style.borderColor = C.line)} />
+        </div>
+
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700, textTransform: "uppercase", marginBottom: 7 }}>Atributos</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {FLAG_FIELDS.map((f) =>
+              chipBtn(flags[f.k], () => setFlags((s) => ({ ...s, [f.k]: !s[f.k] })), f.k,
+                (flags[f.k] ? "✓ " : "") + f.label))}
+          </div>
+        </div>
+
+        {erro && <Aviso>{erro}</Aviso>}
+
+        <button onClick={salvar} disabled={salvando}
+          style={{ width: "100%", marginTop: 12, background: salvando ? C.line : C.cyan, border: "none", color: C.bg,
+            borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700,
+            cursor: salvando ? "default" : "pointer", fontFamily: "inherit" }}>
+          {salvando ? "Salvando…"
+            : confirmaAmbiguo ? "Salvar mesmo fora do Volume"
+            : isEdit ? "Salvar alterações" : "Criar exercício"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   ABA PROTOCOLOS CLÍNICOS
+   ========================================================================= */
+const CAT_ORDER = ["testes", "instrucoes", "tratamento", "exercicios"];
+const CAT_LABEL = { testes: "Testes Avaliativos", instrucoes: "Instruções e Princípios",
+  tratamento: "Tratamento Recomendado", exercicios: "Exercícios Específicos" };
+const CATS = [
+  { k: "testes", label: "Testes", icon: "🔬" },
+  { k: "instrucoes", label: "Instruções", icon: "📌" },
+  { k: "tratamento", label: "Tratamento", icon: "🪺" },
+  { k: "exercicios", label: "Exercícios", icon: "🏋️" },
+];
+
+function ProtocolosTab({ podeEditar }) {
+  const [q, setQ] = useState("");
+  const [aberto, setAberto] = useState(null);
+  const [catFiltro, setCatFiltro] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState("");
+  const [blocos, setBlocos] = useState([]);
+  const [editandoBloco, setEditandoBloco] = useState(null);
+
+  const carregar = useCallback(async () => {
+    setLoading(true); setErro("");
+    try { setBlocos(await db.protLer()); }
+    catch (e) { setErro(String(e.message || e)); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { carregar(); }, [carregar]);
+
+  const PROTOCOLOS = useMemo(() => {
+    const map = new Map();
+    blocos.forEach((b) => {
+      const prot = b.protocolo || "(sem título)";
+      if (!map.has(prot)) map.set(prot, new Map());
+      const cats = map.get(prot);
+      const cat = b.categoria || "exercicios";
+      if (!cats.has(cat)) cats.set(cat, new Map());
+      const subs = cats.get(cat);
+      const sub = b.subcategoria || "";
+      if (!subs.has(sub)) subs.set(sub, []);
+      subs.get(sub).push(b);
+    });
+    const out = [];
+    let id = 0;
+    map.forEach((cats, prot) => {
+      id++;
+      const catsArr = [];
+      let faltando = 0;
+      CAT_ORDER.forEach((c) => {
+        const subs = [];
+        if (cats.has(c)) cats.get(c).forEach((itens, sub) => subs.push({ sub, itens }));
+        const vazia = subs.every((s) => s.itens.length === 0);
+        if (vazia) faltando++;
+        catsArr.push({ cat: c, label: CAT_LABEL[c], subs, vazia });
+      });
+      out.push({ id, titulo: prot, cats: catsArr, faltando });
+    });
+    return out.sort((a, b) => a.titulo.localeCompare(b.titulo, "pt"));
+  }, [blocos]);
+
+  const protVocab = useMemo(() => {
+    const protos = new Set();
+    const subsPorCat = { testes: new Set(), instrucoes: new Set(), tratamento: new Set(), exercicios: new Set() };
+    blocos.forEach((b) => {
+      if (b.protocolo) protos.add(b.protocolo);
+      const cat = b.categoria || "exercicios";
+      if (subsPorCat[cat] && b.subcategoria) subsPorCat[cat].add(b.subcategoria);
+    });
+    const sortPt = (arr) => [...arr].sort((a, b) => a.localeCompare(b, "pt"));
+    const subsOut = {};
+    Object.keys(subsPorCat).forEach((k) => (subsOut[k] = sortPt(subsPorCat[k])));
+    return { protocolos: sortPt(protos), subsPorCat: subsOut };
+  }, [blocos]);
+
+  const lista = useMemo(() => {
+    const nq = strip(q.trim());
+    return PROTOCOLOS.filter((p) => {
+      if (catFiltro.length && !p.cats.some((c) => catFiltro.includes(c.cat) && !c.vazia)) return false;
+      if (!nq) return true;
+      const hay = strip(p.titulo + " " + p.cats.map((c) => c.label + " " +
+        c.subs.map((s) => s.sub + " " + s.itens.map((i) => i.conteudo + " " + (i.detalhe || "")).join(" ")).join(" ")).join(" "));
+      return hay.includes(nq);
+    });
+  }, [q, catFiltro, PROTOCOLOS]);
+
+  const toggleCat = (k) => setCatFiltro((f) => (f.includes(k) ? f.filter((x) => x !== k) : [...f, k]));
+
+  const sevColor = (s) => {
+    const n = strip(s || "");
+    if (n.includes("alta")) return C.danger;
+    if (n.includes("moderada") || n.includes("media")) return "#e0a95f";
+    return C.cyan;
+  };
+
+  const item = (it) => (
+    <div key={it.id} style={{ display: "flex", gap: 8, padding: "8px 0", borderBottom: `1px solid ${C.bg}` }}>
+      <span style={{ color: C.cyan, flex: "0 0 auto", fontSize: 10, lineHeight: "21px" }}>▸</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {podeEditar && (
+          <div style={{ float: "right", marginLeft: 8 }}>
+            <button onClick={() => setEditandoBloco(it)} title="Editar bloco"
+              style={{ background: "none", border: "none", color: C.muted, fontSize: 13,
+                cursor: "pointer", padding: 2 }}>✎</button>
+          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13.5, lineHeight: 1.45 }}>{it.conteudo}</span>
+          {it.severidade && (
+            <span style={{ fontSize: 10, fontWeight: 700, color: sevColor(it.severidade),
+              border: `1px solid ${sevColor(it.severidade)}55`, borderRadius: 5, padding: "1px 6px",
+              whiteSpace: "nowrap" }}>{it.severidade}</span>
+          )}
+          {it.fase && (
+            <span style={{ fontSize: 10, fontWeight: 700, color: C.muted,
+              border: `1px solid ${C.line}`, borderRadius: 5, padding: "1px 6px" }}>{it.fase}</span>
+          )}
+        </div>
+        {it.detalhe && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 3, lineHeight: 1.5 }}>{it.detalhe}</div>}
+        {it.url_imagem && (
+          <img src={it.url_imagem} alt={it.legenda || ""} loading="lazy"
+            style={{ maxWidth: "100%", borderRadius: 8, marginTop: 8, border: `1px solid ${C.line}` }} />
+        )}
+        {it.legenda && <div style={{ fontSize: 10.5, color: C.muted, marginTop: 4, fontStyle: "italic" }}>{it.legenda}</div>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ paddingBottom: 40 }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 10, background: `${C.bg}f2`,
+        backdropFilter: "blur(10px)", borderBottom: `1px solid ${C.line}`, padding: "12px 14px 10px" }}>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar condição, teste, exercício…"
+            style={{ flex: 1, background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+              color: C.text, padding: "11px 13px", fontSize: 15, fontFamily: "inherit", outline: "none" }}
+            onFocus={(e) => (e.target.style.borderColor = C.cyan)}
+            onBlur={(e) => (e.target.style.borderColor = C.line)} />
+          {podeEditar && (
+            <button onClick={() => setEditandoBloco({})} title="Novo bloco de protocolo"
+              style={{ flex: "0 0 46px", background: C.cyan, border: "none", borderRadius: 10, color: C.bg,
+                fontSize: 24, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>+</button>
+          )}
+        </div>
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingTop: 9, marginRight: -14 }}>
+          {CATS.map((c) => chipBtn(catFiltro.includes(c.k), () => toggleCat(c.k), c.k, `${c.icon} ${c.label}`))}
+        </div>
+      </div>
+
+      {loading && (
+        <div style={{ padding: "50px 24px", textAlign: "center", color: C.muted }}>
+          <div style={{ width: 24, height: 24, border: `3px solid ${C.line}`, borderTopColor: C.cyan,
+            borderRadius: "50%", margin: "0 auto 12px", animation: "spin .8s linear infinite" }} />
+          Carregando protocolos…
+        </div>
+      )}
+      {erro && !loading && (
+        <div style={{ padding: "40px 24px", textAlign: "center" }}>
+          <div style={{ color: C.danger, marginBottom: 10 }}>Não consegui carregar os protocolos.</div>
+          <div style={{ color: C.muted, fontSize: 12, marginBottom: 14, wordBreak: "break-word" }}>{erro}</div>
+          <button onClick={carregar} style={{ background: C.cyan, border: "none", color: C.bg,
+            borderRadius: 8, padding: "9px 16px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Tentar de novo</button>
+        </div>
+      )}
+      {!loading && !erro && lista.length === 0 && (
+        <div style={{ padding: "50px 24px", textAlign: "center", color: C.muted }}>
+          {blocos.length === 0
+            ? "Nenhum protocolo cadastrado ainda. Use o + para criar o primeiro bloco."
+            : "Nada encontrado."}
+        </div>
+      )}
+
+      {!loading && !erro && lista.map((p) => {
+        const open = aberto === p.id;
+        const total = p.cats.reduce((a, c) => a + c.subs.reduce((b, s) => b + s.itens.length, 0), 0);
+        return (
+          <div key={p.id} style={{ borderBottom: `1px solid ${C.line}` }}>
+            <button onClick={() => setAberto(open ? null : p.id)}
+              style={{ width: "100%", textAlign: "left", background: open ? C.surface : "transparent",
+                border: "none", color: C.text, padding: "15px 14px", cursor: "pointer",
+                fontFamily: "inherit", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: open ? 700 : 500, lineHeight: 1.3 }}>{p.titulo}</div>
+                <div style={{ fontSize: 10.5, color: C.muted, marginTop: 3, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span>
+                    {p.cats.filter((c) => !c.vazia).map((c) => (CATS.find((x) => x.k === c.cat) || {}).icon).join(" ")} · {total} itens
+                  </span>
+                  {p.faltando > 0 && (
+                    <span style={{ color: C.danger, border: `1px solid ${C.danger}55`, borderRadius: 5,
+                      padding: "1px 6px", fontWeight: 700, fontSize: 10 }}>
+                      falta {p.faltando} de 4
+                    </span>
+                  )}
+                </div>
+              </div>
+              <span style={{ color: C.cyan, fontSize: 12 }}>{open ? "▾" : "▸"}</span>
+            </button>
+
+            {open && (
+              <div style={{ padding: "2px 14px 22px", background: C.surface }}>
+                {p.cats
+                  .filter((c) => !catFiltro.length || catFiltro.includes(c.cat))
+                  .map((c) => (
+                    <div key={c.cat} style={{ marginTop: 16, opacity: c.vazia ? 0.55 : 1 }}>
+                      <div style={{ fontSize: 10.5, letterSpacing: "0.14em",
+                        color: c.vazia ? C.muted : C.cyan, fontWeight: 700,
+                        textTransform: "uppercase", paddingBottom: 6,
+                        borderBottom: `1px solid ${C.line}`, marginBottom: 6,
+                        display: "flex", alignItems: "center", gap: 7 }}>
+                        <span>{(CATS.find((x) => x.k === c.cat) || {}).icon} {c.label}</span>
+                        {c.vazia && (
+                          <span style={{ fontSize: 9, letterSpacing: "0.08em", color: C.danger,
+                            border: `1px solid ${C.danger}55`, borderRadius: 4, padding: "1px 5px" }}>
+                            a preencher
+                          </span>
+                        )}
+                      </div>
+                      {c.vazia ? (
+                        <div style={{ fontSize: 12, color: C.muted, fontStyle: "italic", padding: "4px 0 2px" }}>
+                          — ainda sem conteúdo nesta categoria —
+                        </div>
+                      ) : (
+                        c.subs.map((s, si) => (
+                          <div key={si} style={{ marginTop: s.sub ? 12 : 0 }}>
+                            {s.sub && (
+                              <div style={{ fontSize: 12, fontWeight: 700, color: C.text, background: C.surface2,
+                                padding: "5px 9px", borderRadius: 6, marginBottom: 4, display: "inline-block" }}>
+                                {s.sub}
+                              </div>
+                            )}
+                            {s.itens.map(item)}
+                          </div>
+                        ))
+                      )}
+                      {podeEditar && (
+                        <button
+                          onClick={() => setEditandoBloco({
+                            protocolo: p.titulo,
+                            categoria: c.cat,
+                            subcategoria: !c.vazia && c.subs.length === 1 ? c.subs[0].sub : "",
+                          })}
+                          style={{ marginTop: 8, background: "none", border: `1px dashed ${C.line}`,
+                            color: C.cyan, borderRadius: 8, padding: "6px 11px", fontSize: 11.5,
+                            cursor: "pointer", fontFamily: "inherit" }}>
+                          + adicionar em {c.label}
+                        </button>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {editandoBloco !== null && (
+        <ProtocoloModal
+          registro={editandoBloco}
+          vocab={protVocab}
+          onClose={() => setEditandoBloco(null)}
+          onSaved={async () => { setEditandoBloco(null); await carregar(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   MODAL DE BLOCO DE PROTOCOLO
+   ========================================================================= */
+function ProtocoloModal({ registro, vocab, onClose, onSaved }) {
+  const isEdit = !!registro.id;
+  const [protocolo, setProtocolo] = useState(registro.protocolo || "");
+  const [categoria, setCategoria] = useState(registro.categoria || "testes");
+  const [subcategoria, setSubcategoria] = useState(registro.subcategoria || "");
+  const [conteudo, setConteudo] = useState(registro.conteudo || "");
+  const [detalhe, setDetalhe] = useState(registro.detalhe || "");
+  const [severidade, setSeveridade] = useState(registro.severidade || "");
+  const [fase, setFase] = useState(registro.fase || "");
+  const [urlImagem, setUrlImagem] = useState(registro.url_imagem || "");
+  const [legenda, setLegenda] = useState(registro.legenda || "");
+  const [ordem, setOrdem] = useState(registro.ordem != null ? String(registro.ordem) : "0");
+  const [salvando, setSalvando] = useState(false);
+  const [excluindo, setExcluindo] = useState(false);
+  const [confirmaEx, setConfirmaEx] = useState(false);
+  const [erro, setErro] = useState("");
+
+  const subSugestoes = vocab.subsPorCat[categoria] || [];
+
+  const salvar = async () => {
+    if (!protocolo.trim()) { setErro("Dá um nome pro protocolo 🙂"); return; }
+    if (!conteudo.trim()) { setErro("Escreve o conteúdo do bloco."); return; }
+    setSalvando(true); setErro("");
+    const dados = {
+      protocolo: protocolo.trim(),
+      categoria,
+      subcategoria: subcategoria.trim(),
+      ordem: Number(ordem) || 0,
+      conteudo: conteudo.trim(),
+      detalhe: detalhe.trim(),
+      severidade: severidade.trim(),
+      fase: fase.trim(),
+      url_imagem: urlImagem.trim(),
+      legenda: legenda.trim(),
+    };
+    try {
+      if (isEdit) await db.protAtualizar(registro.id, dados);
+      else await db.protCriar(dados);
+      await onSaved();
+    } catch (e) {
+      setErro(String(e.message || e));
+      setSalvando(false);
+    }
+  };
+
+  const excluir = async () => {
+    setExcluindo(true); setErro("");
+    try { await db.protExcluir(registro.id); await onSaved(); }
+    catch (e) { setErro(String(e.message || e)); setExcluindo(false); }
+  };
+
+  const labelCss = { fontSize: 11, letterSpacing: "0.14em", color: C.cyan, fontWeight: 700,
+    textTransform: "uppercase", marginBottom: 7, display: "block" };
+  const inputCss = { width: "100%", background: C.surface, border: `1px solid ${C.line}`, borderRadius: 10,
+    color: C.text, padding: "11px 13px", fontSize: 15, fontFamily: "inherit", outline: "none" };
+  const foco = (e) => (e.target.style.borderColor = C.cyan);
+  const blur = (e) => (e.target.style.borderColor = C.line);
+  const opcional = <span style={{ color: C.muted, fontWeight: 400, letterSpacing: 0, textTransform: "none" }}>(opcional)</span>;
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, background: "rgba(0,0,0,.7)",
+      display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.bg, width: "100%", maxWidth: 640,
+        maxHeight: "92vh", overflowY: "auto", borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        border: `1px solid ${C.line}`, padding: "18px 16px 24px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{isEdit ? "Editar bloco" : "Novo bloco"}</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, fontSize: 24, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelCss}>Protocolo / condição</label>
+          <input list="lista-protocolos" value={protocolo} onChange={(e) => setProtocolo(e.target.value)}
+            placeholder="Ex.: Radiculopatia, De Quervain…" style={inputCss} onFocus={foco} onBlur={blur} />
+          <datalist id="lista-protocolos">
+            {vocab.protocolos.map((p) => <option key={p} value={p} />)}
+          </datalist>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelCss}>Categoria</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {CATS.map((c) => chipBtn(categoria === c.k, () => setCategoria(c.k), c.k, `${c.icon} ${CAT_LABEL[c.k]}`))}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelCss}>Subcategoria {opcional}</label>
+          <input list="lista-subs" value={subcategoria} onChange={(e) => setSubcategoria(e.target.value)}
+            placeholder="Ex.: Alongamento Piriforme…" style={inputCss} onFocus={foco} onBlur={blur} />
+          <datalist id="lista-subs">
+            {subSugestoes.map((s) => <option key={s} value={s} />)}
+          </datalist>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelCss}>Conteúdo</label>
+          <textarea value={conteudo} onChange={(e) => setConteudo(e.target.value)} rows={2}
+            placeholder="Texto principal do bloco" style={{ ...inputCss, resize: "vertical", lineHeight: 1.5 }}
+            onFocus={foco} onBlur={blur} />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelCss}>Detalhe {opcional}</label>
+          <textarea value={detalhe} onChange={(e) => setDetalhe(e.target.value)} rows={2}
+            placeholder="Observação, série x reps, referência…" style={{ ...inputCss, resize: "vertical", lineHeight: 1.5 }}
+            onFocus={foco} onBlur={blur} />
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <label style={labelCss}>Severidade</label>
+            <input value={severidade} onChange={(e) => setSeveridade(e.target.value)}
+              placeholder="Alta / Moderada / Leve" style={inputCss} onFocus={foco} onBlur={blur} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label style={labelCss}>Fase</label>
+            <input value={fase} onChange={(e) => setFase(e.target.value)}
+              placeholder="Ex.: Aguda, Fase 1…" style={inputCss} onFocus={foco} onBlur={blur} />
+          </div>
+          <div style={{ flex: "0 0 84px" }}>
+            <label style={labelCss}>Ordem</label>
+            <input value={ordem} onChange={(e) => setOrdem(e.target.value)} inputMode="numeric"
+              placeholder="0" style={inputCss} onFocus={foco} onBlur={blur} />
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelCss}>URL da imagem {opcional}</label>
+          <input value={urlImagem} onChange={(e) => setUrlImagem(e.target.value)}
+            placeholder="https://…" style={inputCss} onFocus={foco} onBlur={blur} />
+        </div>
+        <div style={{ marginBottom: 18 }}>
+          <label style={labelCss}>Legenda {opcional}</label>
+          <input value={legenda} onChange={(e) => setLegenda(e.target.value)}
+            placeholder="Legenda da imagem" style={inputCss} onFocus={foco} onBlur={blur} />
+        </div>
+
+        {erro && <Aviso>{erro}</Aviso>}
+
+        <button onClick={salvar} disabled={salvando || excluindo}
+          style={{ width: "100%", marginTop: 12, background: salvando ? C.line : C.cyan, border: "none", color: C.bg,
+            borderRadius: 10, padding: "13px", fontSize: 15, fontWeight: 700,
+            cursor: salvando ? "default" : "pointer", fontFamily: "inherit" }}>
+          {salvando ? "Salvando…" : isEdit ? "Salvar alterações" : "Criar bloco"}
+        </button>
+
+        {isEdit && (
+          <div style={{ marginTop: 12 }}>
+            {!confirmaEx ? (
+              <button onClick={() => setConfirmaEx(true)} disabled={salvando || excluindo}
+                style={{ width: "100%", background: "none", border: `1px solid ${C.danger}55`,
+                  color: C.danger, borderRadius: 10, padding: "11px", fontSize: 13.5, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit" }}>
+                Excluir este bloco
+              </button>
+            ) : (
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setConfirmaEx(false)} disabled={excluindo}
+                  style={{ flex: 1, background: "none", border: `1px solid ${C.line}`, color: C.text,
+                    borderRadius: 10, padding: "11px", fontSize: 13.5, cursor: "pointer", fontFamily: "inherit" }}>
+                  Cancelar
+                </button>
+                <button onClick={excluir} disabled={excluindo}
+                  style={{ flex: 1, background: C.danger, border: "none", color: "#fff",
+                    borderRadius: 10, padding: "11px", fontSize: 13.5, fontWeight: 700,
+                    cursor: excluindo ? "default" : "pointer", fontFamily: "inherit" }}>
+                  {excluindo ? "Excluindo…" : "Confirmar exclusão"}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   SHELL
+   ========================================================================= */
+function App() {
+  const [sessao, setSessao] = useState(undefined); // undefined = ainda verificando
+  const [treinador, setTreinador] = useState(null); // null = verificando
+  const [aba, setAba] = useState("cardapio");
+
+  useEffect(() => {
+    sb.auth.getSession().then(({ data }) => setSessao(data.session || null));
+    const { data } = sb.auth.onAuthStateChange((_evento, s) => setSessao(s || null));
+    return () => { try { data.subscription.unsubscribe(); } catch (e) {} };
+  }, []);
+
+  useEffect(() => {
+    if (!sessao) { setTreinador(null); return; }
+    let vivo = true;
+    db.ehTreinador().then((r) => { if (vivo) setTreinador(r); });
+    return () => { vivo = false; };
+  }, [sessao]);
+
+  const estilos = `*{box-sizing:border-box} body{margin:0;background:${C.bg}}
+    ::-webkit-scrollbar{width:6px;height:6px}
+    ::-webkit-scrollbar-thumb{background:${C.line};border-radius:9px}
+    input::placeholder,textarea::placeholder{color:${C.muted}}
+    .row:active{background:${C.surface2}}
+    button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid ${C.bright};outline-offset:2px}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}`;
+
+  const base = (conteudo) => (
+    <div style={{ background: C.bg, color: C.text, minHeight: "100vh",
+      fontFamily: "'Space Grotesk', ui-sans-serif, system-ui, sans-serif" }}>
+      <style dangerouslySetInnerHTML={{ __html: estilos }} />
+      {conteudo}
+    </div>
+  );
+
+  if (sessao === undefined) return base(
+    <div style={{ padding: "80px 24px", textAlign: "center", color: C.muted }}>
+      <div style={{ width: 26, height: 26, border: `3px solid ${C.line}`, borderTopColor: C.cyan,
+        borderRadius: "50%", margin: "0 auto 14px", animation: "spin .8s linear infinite" }} />
+      Verificando acesso…
+    </div>
+  );
+
+  if (!sessao) return base(<Login />);
+
+  const tab = (id, label) => (
+    <button onClick={() => setAba(id)}
+      style={{ flex: 1, background: "transparent", border: "none",
+        borderBottom: `2px solid ${aba === id ? C.cyan : "transparent"}`,
+        color: aba === id ? C.cyan : C.muted, padding: "13px 8px", fontSize: 13.5,
+        fontWeight: aba === id ? 700 : 500, cursor: "pointer", fontFamily: "inherit",
+        letterSpacing: "0.02em", transition: "all .15s ease" }}>
+      {label}
+    </button>
+  );
+
+  const podeEditar = treinador === true;
+
+  return base(
+    <>
+      <div style={{ padding: "12px 14px 2px", display: "flex", alignItems: "center", gap: 10 }}>
+        <LogoIdealis size={32} />
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 10.5, color: C.muted, maxWidth: 160, overflow: "hidden",
+          textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {sessao.user && sessao.user.email}
+        </span>
+        <button onClick={() => db.sair()}
+          style={{ background: "none", border: `1px solid ${C.line}`, color: C.muted, borderRadius: 8,
+            padding: "5px 10px", fontSize: 11.5, cursor: "pointer", fontFamily: "inherit" }}>Sair</button>
+      </div>
+
+      {treinador === false && (
+        <div style={{ margin: "8px 14px 0", background: `${C.cyan}12`, border: `1px solid ${C.cyan}44`,
+          borderRadius: 10, padding: "9px 11px", fontSize: 11.5, color: C.text, lineHeight: 1.45 }}>
+          Somente leitura: esta conta não é de treinador. Entre com a conta da Dashboard para editar.
+        </div>
+      )}
+
+      <div style={{ display: "flex", borderBottom: `1px solid ${C.line}`, padding: "6px 8px 0" }}>
+        {tab("cardapio", "Cardápio")}
+        {tab("protocolos", "Protocolos Clínicos")}
+      </div>
+
+      {aba === "cardapio"
+        ? <CardapioTab podeEditar={podeEditar} />
+        : <ProtocolosTab podeEditar={podeEditar} />}
+    </>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(App));
+window.__APP_OK = true;
+</script>
+</body>
+</html>
